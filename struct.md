@@ -34,14 +34,14 @@ CS181_project/
 
 ### 2.1 Basic Setup
 
-| Parameter       | Value            | Description                              |
-| --------------- | ---------------- | ---------------------------------------- |
-| Game mode       | 2-player AI vs AI | Heads-up Limit Texas Hold'em            |
-| Deck            | 16 cards         | 2 suits (♠♥) × 8 ranks (7,8,9,T,J,Q,K,A) |
-| Starting chips  | 1000             | Per player                               |
-| Blinds          | SB=5, BB=10      | Heads-up: dealer = small blind           |
-| Betting levels  | {10, 20, 40, 80} | Corresponding to B_level 0~3            |
-| Max raises      | 3 per round      | Highest bet = 80                         |
+| Parameter      | Value             | Description                              |
+| -------------- | ----------------- | ---------------------------------------- |
+| Game mode      | 2-player AI vs AI | Heads-up Limit Texas Hold'em             |
+| Deck           | 16 cards          | 2 suits (♠♥) × 8 ranks (7,8,9,T,J,Q,K,A) |
+| Starting chips | 1000              | Per player                               |
+| Blinds         | SB=5, BB=10       | Heads-up: dealer = small blind           |
+| Betting levels | {10, 20, 40, 80}  | Corresponding to B_level 0~3             |
+| Max raises     | 3 per round       | Highest bet = 80                         |
 
 ### 2.2 Action Space
 
@@ -106,12 +106,12 @@ Straight Flush > Four of a Kind > Full House > Flush > Straight > High Card
 
 $$s = (H_{\text{code}},\; P_{\text{code}},\; B_{\text{level}},\; Pos)$$
 
-| Component | Meaning           | Encoding                                |
-| --------- | ----------------- | --------------------------------------- |
-| H_code    | Own hand equity   | Discretized into 20 bins (equity_to_bin)|
-| P_code    | Community info    | Community card count / treys rank code  |
-| B_level   | Betting level     | {0, 1, 2, 3} → {10, 20, 40, 80}        |
-| Pos       | Seat position     | {0, 1}                                  |
+| Component | Meaning         | Encoding                                 |
+| --------- | --------------- | ---------------------------------------- |
+| H_code    | Own hand equity | Discretized into 20 bins (equity_to_bin) |
+| P_code    | Community info  | Community card count / treys rank code   |
+| B_level   | Betting level   | {0, 1, 2, 3} → {10, 20, 40, 80}          |
+| Pos       | Seat position   | {0, 1}                                   |
 
 ### 3.2 Reward Function
 
@@ -147,12 +147,12 @@ Built on `treys` library's `Card.new()` for integer card representation:
 
 ### 4.3 game/evaluator.py — Hand Evaluation & Comparison
 
-| Function                                 | Description                                  |
-| ---------------------------------------- | -------------------------------------------- |
+| Function                                 | Description                                      |
+| ---------------------------------------- | ------------------------------------------------ |
 | `evaluate_hand(hole, community)`         | Returns (rank, class_str); lower rank = stronger |
-| `compare_hands(hole1, hole2, community)` | Returns (1/0/-1, winner_hand_class)          |
-| `compute_equity(hole, community, sim=0)` | Win rate; sim=0 = exact enum, else MC sample |
-| `equity_to_bin(equity, bins=20)`         | Discretize [0,1] equity to bin index         |
+| `compare_hands(hole1, hole2, community)` | Returns (1/0/-1, winner_hand_class)              |
+| `compute_equity(hole, community, sim=0)` | Win rate; sim=0 = exact enum, else MC sample     |
+| `equity_to_bin(equity, bins=20)`         | Discretize [0,1] equity to bin index             |
 
 The 16-card deck keeps exact enumeration computationally feasible.
 
@@ -201,29 +201,29 @@ class BaseAgent(ABC):
 
 Fields available to Agent in `act()`:
 
-| Field               | Type      | Description                    |
-| ------------------- | --------- | ------------------------------ |
-| `hole_cards`        | list[int] | Own hole cards (treys integers)|
-| `community_cards`   | list[int] | Current community cards        |
-| `pot`               | int       | Total pot                      |
-| `current_bet`       | int       | Current amount to call         |
-| `player_chips`      | int       | Own remaining chips            |
-| `opponent_chips`    | int       | Opponent remaining chips       |
-| `betting_level`     | int       | Betting level (0~3)            |
-| `current_round`     | int       | Current round (0~3)            |
-| `position`          | int       | Seat (0 or 1)                  |
-| `legal_actions`     | list[int] | Legal action list              |
-| `raises_this_round` | int       | Raises made this round         |
-| `equity`            | float     | Current hand equity            |
+| Field               | Type      | Description                     |
+| ------------------- | --------- | ------------------------------- |
+| `hole_cards`        | list[int] | Own hole cards (treys integers) |
+| `community_cards`   | list[int] | Current community cards         |
+| `pot`               | int       | Total pot                       |
+| `current_bet`       | int       | Current amount to call          |
+| `player_chips`      | int       | Own remaining chips             |
+| `opponent_chips`    | int       | Opponent remaining chips        |
+| `betting_level`     | int       | Betting level (0~3)             |
+| `current_round`     | int       | Current round (0~3)             |
+| `position`          | int       | Seat (0 or 1)                   |
+| `legal_actions`     | list[int] | Legal action list               |
+| `raises_this_round` | int       | Raises made this round          |
+| `equity`            | float     | Current hand equity             |
 
 ### 5.3 Agent Summary
 
-| Agent       | Core Method                                       | State Encoding                                              |
-| ----------- | ------------------------------------------------- | ----------------------------------------------------------- |
-| Expert      | External Sampling MCCFR → approximate Nash eq.    | Info set (hole_bucket, comm_bucket, round, bet_level, raises)|
-| SARSA       | Q(s,a) online TD update                           | (H_code, P_code, B_level, Pos)                              |
-| Bayesian-MC | Bayesian inference on opponent hand → MC Q-table  | (S, B, O), O = argmax posterior                             |
-| NN-MC       | BNN (MC Dropout) predicts opponent → MC Q-table   | (S, B, O_NN), O_NN = BNN argmax                            |
+| Agent       | Core Method                                      | State Encoding                                                |
+| ----------- | ------------------------------------------------ | ------------------------------------------------------------- |
+| Expert      | External Sampling MCCFR → approximate Nash eq.   | Info set (hole_bucket, comm_bucket, round, bet_level, raises) |
+| SARSA       | Q(s,a) online TD update                          | (H_code, P_code, B_level, Pos)                                |
+| Bayesian-MC | Bayesian inference on opponent hand → MC Q-table | (S, B, O), O = argmax posterior                               |
+| NN-MC       | BNN (MC Dropout) predicts opponent → MC Q-table  | (S, B, O_NN), O_NN = BNN argmax                               |
 
 ---
 
@@ -241,11 +241,11 @@ Fields available to Agent in `act()`:
 
 To reduce traversal cost, we use the **External Sampling** variant:
 
-| Decision Type         | Processing Method              |
-| --------------------- | ------------------------------ |
-| Current player action | Traverse all legal actions     |
-| Opponent action       | **Sample** one via strategy    |
-| Dealing (Chance)      | **Sample** community cards     |
+| Decision Type         | Processing Method           |
+| --------------------- | --------------------------- |
+| Current player action | Traverse all legal actions  |
+| Opponent action       | **Sample** one via strategy |
+| Dealing (Chance)      | **Sample** community cards  |
 
 This reduces per-iteration node count from exponential to linear. 30k iterations ≈ 2 minutes.
 
@@ -256,14 +256,14 @@ info_key = (player, hole_bucket, community_bucket,
             betting_round, betting_level, raises_this_round)
 ```
 
-| Component         | Encoding | Description                              |
-| ----------------- | -------- | ---------------------------------------- |
-| player            | 0/1      | Player ID                                |
-| hole_bucket       | 0~9      | Preflop equity discretized into 10 buckets|
-| community_bucket  | 0/3/4/5  | Community card count (encodes game stage)|
-| betting_round     | 0~3      | Preflop/Flop/Turn/River                  |
-| betting_level     | -1~3     | Bet level (-1=no bet yet, 0~3=levels)    |
-| raises_this_round | 0~3      | Raises made this round                   |
+| Component         | Encoding | Description                                |
+| ----------------- | -------- | ------------------------------------------ |
+| player            | 0/1      | Player ID                                  |
+| hole_bucket       | 0~9      | Preflop equity discretized into 10 buckets |
+| community_bucket  | 0/3/4/5  | Community card count (encodes game stage)  |
+| betting_round     | 0~3      | Preflop/Flop/Turn/River                    |
+| betting_level     | -1~3     | Bet level (-1=no bet yet, 0~3=levels)      |
+| raises_this_round | 0~3      | Raises made this round                     |
 
 **Key design decision**: In Limit Hold'em, betting state is fully determined by (betting_level, raises_this_round) — no need for full action history. This reduces info set count from hundreds of thousands to ~200.
 
@@ -278,11 +278,11 @@ info_key = (player, hole_bucket, community_bucket,
 
 500-hand match statistics (30k CFR iterations):
 
-| Matchup          | Win Rate           | Notes                      |
-| ---------------- | ------------------ | -------------------------- |
-| Expert vs Random | **67.8%** vs 28.6% | CFR significantly beats random |
-| Expert vs Expert | 45.6% vs 49.0%    | Near 50/50 (slight position bias)|
-| Random vs Random | ~50/50             | Symmetric control          |
+| Matchup          | Win Rate           | Notes                             |
+| ---------------- | ------------------ | --------------------------------- |
+| Expert vs Random | **67.8%** vs 28.6% | CFR significantly beats random    |
+| Expert vs Expert | 45.6% vs 49.0%     | Near 50/50 (slight position bias) |
+| Random vs Random | ~50/50             | Symmetric control                 |
 
 ---
 
@@ -310,13 +310,13 @@ The only dependency is `treys` (poker hand evaluation library).
 
 ### 8.2 Available Agent Types
 
-| Agent Key      | Class           | Description                              |
-| -------------- | --------------- | ---------------------------------------- |
-| `random`       | RandomAgent     | Uniform random over legal actions        |
-| `expert`       | ExpertAgent     | CFR-trained Nash equilibrium strategy    |
-| `sarsa`        | SARSAAgent      | SARSA online Q-learning (placeholder)    |
-| `bayesian_mc`  | BayesianMCAgent | Bayesian + MC Q-table (placeholder)      |
-| `nn_mc`        | NN_MCAgent      | BNN + MC Q-table (placeholder)           |
+| Agent Key     | Class           | Description                           |
+| ------------- | --------------- | ------------------------------------- |
+| `random`      | RandomAgent     | Uniform random over legal actions     |
+| `expert`      | ExpertAgent     | CFR-trained Nash equilibrium strategy |
+| `sarsa`       | SARSAAgent      | SARSA online Q-learning (placeholder) |
+| `bayesian_mc` | BayesianMCAgent | Bayesian + MC Q-table (placeholder)   |
+| `nn_mc`       | NN_MCAgent      | BNN + MC Q-table (placeholder)        |
 
 ### 8.3 Running from Command Line
 
