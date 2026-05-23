@@ -1,4 +1,4 @@
-# agents/nn_mc_agent.py - BNN (贝叶斯神经网络) + MC Q 表 Agent (占位)
+# agents/nn_mc_agent.py - BNN (Bayesian Neural Network) + MC Q-table Agent (placeholder)
 
 from agents.base_agent import BaseAgent
 from game.engine import Observation
@@ -6,63 +6,64 @@ from game.engine import Observation
 
 class NN_MCAgent(BaseAgent):
     """
-    贝叶斯神经网络-蒙特卡洛 Agent。
+    Bayesian Neural Network - Monte Carlo Agent.
 
-    核心思路:
-      用 BNN (MC Dropout) 替代离散贝叶斯推断，可捕获多步动作模式
-      (如 flop check → turn raise 诈唬签名)。
+    Core idea:
+      Use BNN (MC Dropout) to replace discrete Bayesian inference,
+      capable of capturing multi-step action patterns
+      (e.g., flop check → turn raise bluff signature).
 
-    BNN 输入:
-      - Own hand equity: 标量 [0,1]
-      - Community card strength: 标量 [0,1]
+    BNN input:
+      - Own hand equity: scalar [0,1]
+      - Community card strength: scalar [0,1]
       - Betting round: one-hot (4 dims)
-      - Opponent action matrix M_opp: shape R×k (R=4轮, k=4动作槽)
+      - Opponent action matrix M_opp: shape R×k (R=4 rounds, k=4 action slots)
       - Own action matrix M_self: shape R×k
       - New-community-card flag: binary
 
-    BNN 输出:
-      - 对手手牌强度分布 → argmax → O_NN
+    BNN output:
+      - Opponent hand strength distribution → argmax → O_NN
 
-    MC Q-table 状态:
+    MC Q-table state:
       s = (S, B, O_NN)
-      S: equity 离散 20 bins
-      B: 下注等级 {0,1,2,3}
-      O_NN: BNN 预测的对手信念标签
+      S: equity discretized into 20 bins
+      B: betting level {0,1,2,3}
+      O_NN: BNN predicted opponent belief label
 
-    TODO: 实现 BNN 网络结构、MC Dropout 推理、Q-table 更新
+    TODO: Implement BNN network structure, MC Dropout inference, Q-table update
     """
 
     def __init__(self, name: str = "NN_MCAgent"):
         super().__init__(name=name)
         self.q_table = {}
-        self.bnn_model = None  # TODO: 初始化 BNN
+        self.bnn_model = None  # TODO: Initialize BNN
 
     def act(self, obs: Observation) -> int:
-        # 占位
+        # Placeholder
         from game.constants import CALL
         return CALL
 
     def _encode_action_matrix(self, action_history: list) -> list:
         """
-        将动作历史编码为 R×k 矩阵。
+        Encode action history into an R×k matrix.
 
         Args:
-            action_history: 按轮次组织的动作序列
+            action_history: action sequence organized by round
 
         Returns:
-            R×k 矩阵 (R=4, k=4)
+            R×k matrix (R=4, k=4)
         """
         R, k = 4, 4
         matrix = [[-1] * k for _ in range(R)]
-        # TODO: 填充实际动作
+        # TODO: Fill in actual actions
         return matrix
 
     def _predict_opponent_strength(self, obs: Observation) -> str:
         """
-        使用 BNN 预测对手手牌强度标签。
+        Predict opponent hand strength label using BNN.
 
         Returns:
             "strong" / "mid" / "weak"
         """
-        # TODO: 实现 MC Dropout 推理
+        # TODO: Implement MC Dropout inference
         return "mid"

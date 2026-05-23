@@ -1,4 +1,4 @@
-# game/engine.py - 游戏引擎：发牌、下注轮次、开牌全流程
+# game/engine.py - Game engine: dealing, betting rounds, showdown full flow
 
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -17,11 +17,11 @@ from game.constants import (
 
 @dataclass
 class PlayerState:
-    """单个玩家在一手牌中的状态"""
+    """Single player's state within a hand"""
     chips: int = STARTING_CHIPS
     hole_cards: list[int] = field(default_factory=list)
-    round_bet: int = 0        # 当前下注轮的累计下注
-    total_bet: int = 0        # 本手牌的累计下注
+    round_bet: int = 0        # Cumulative bet in current betting round
+    total_bet: int = 0        # Cumulative bet in this hand
     folded: bool = False
     acted_this_round: bool = False
 
@@ -29,24 +29,25 @@ class PlayerState:
 @dataclass
 class Observation:
     """
-    Agent 可观测到的游戏状态信息。
+    Observable game state information for Agent.
 
-    遵循 MDP 建模: s = (H_code, P_code, B_level, Pos)
+    Following MDP modeling: s = (H_code, P_code, B_level, Pos)
     """
-    hole_cards: list[int]          # 己方底牌
-    community_cards: list[int]     # 公共牌
-    pot: int                       # 底池总额
-    current_bet: int               # 当前需要跟注的金额
-    player_round_bet: int          # 己方本轮已下注额
-    player_chips: int              # 己方剩余筹码
-    opponent_chips: int            # 对手剩余筹码
-    betting_level: int             # 下注等级 B_level ∈ {0,1,2,3}
-    current_round: int             # 当前轮次 (PREFLOP/FLOP/TURN/RIVER)
-    position: int                  # 座位位置 0 or 1
-    dealer_pos: int                # 庄家位置
-    legal_actions: list[int]       # 合法动作列表
-    raises_this_round: int         # 本轮已加注次数
-    equity: float = 0.0            # 当前手牌 equity (可选，按需计算)
+    hole_cards: list[int]          # Own hole cards
+    community_cards: list[int]     # Community cards
+    pot: int                       # Total pot
+    current_bet: int               # Current amount to call
+    player_round_bet: int          # Own bet in current round
+    player_chips: int              # Own remaining chips
+    opponent_chips: int            # Opponent remaining chips
+    betting_level: int             # Betting level B_level ∈ {0,1,2,3}
+    current_round: int             # Current round (PREFLOP/FLOP/TURN/RIVER)
+    position: int                  # Seat position 0 or 1
+    dealer_pos: int                # Dealer position
+    legal_actions: list[int]       # Legal action list
+    raises_this_round: int         # Number of raises in this round
+    # Current hand equity (optional, computed on demand)
+    equity: float = 0.0
 
     @property
     def hole_cards_str(self) -> list[str]:
@@ -67,53 +68,53 @@ class Observation:
 
 @dataclass
 class HandResult:
-    """一手牌的结果"""
-    winner: Optional[int]    # 赢家 (0 or 1), 平局为 None
-    pot: int                 # 底池金额
-    hand_class: str          # 赢家牌型
+    """Result of a single hand"""
+    winner: Optional[int]    # Winner (0 or 1), None for tie
+    pot: int                 # Pot amount
+    hand_class: str          # Winner's hand class
     player_hands: dict       # {player_id: (rank, class_str)}
     rewards: dict            # {player_id: reward}
 
 
 class GameEngine:
     """
-    极简双人德州扑克游戏引擎。
+    Minimalist heads-up Texas Hold'em game engine.
 
-    支持:
-      - step-based 接口: reset_hand() + step(action) → 适合 RL 训练
-      - hand-based 接口: run_hand() → 适合评估和锦标赛
-      - 批量运行: run(num_hands) → 适合统计对比
+    Supports:
+      - step-based interface: reset_hand() + step(action) → for RL training
+      - hand-based interface: run_hand() → for evaluation and tournaments
+      - batch run: run(num_hands) → for statistical comparison
     """
 
     def __init__(self, agent0, agent1):
         """
         Args:
-            agent0: 玩家0的 Agent
-            agent1: 玩家1的 Agent
+            agent0: Agent for player 0
+            agent1: Agent for player 1
         """
         self.agents = [agent0, agent1]
         self.deck = Deck()
         self.hand_count = 0
 
-        # 游戏状态
+        # Game state
         self.players: list[PlayerState] = []
         self.community_cards: list[int] = []
         self.pot: int = 0
         self.current_round: int = PREFLOP
-        self.betting_level: int = 0       # 当前下注等级
-        self.raises_this_round: int = 0   # 本轮加注次数
+        self.betting_level: int = 0       # Current betting level
+        self.raises_this_round: int = 0   # Raises in this round
         self.dealer_pos: int = 0
         self.current_player: int = 0
         self.hand_over: bool = False
 
-    # ==================== 核心游戏流程 ====================
+    # ==================== Core Game Flow ====================
 
     def reset_hand(self) -> Observation:
         """
-        重置并开始新一手牌：洗牌、发底牌、下盲注。
+        Reset and start a new hand: shuffle, deal hole cards, post blinds.
 
         Returns:
-            第一个行动玩家的 Observation
+            Observation for the first player to act
         """
         self.deck.reset()
         self.community_cards = []
@@ -121,22 +122,23 @@ class GameEngine:
         self.hand_over = False
         self.current_round = PREFLOP
 
-        # 保存上一手的筹码
-        prev_chips = [p.chips for p in self.players] if self.players else [STARTING_CHIPS] * NUM_PLAYERS
+        # Save chips from previous hand
+        prev_chips = [p.chips for p in self.players] if self.players else [
+            STARTING_CHIPS] * NUM_PLAYERS
 
-        # 初始化玩家状态
+        # Initialize player states
         self.players = []
         for i in range(NUM_PLAYERS):
             self.players.append(PlayerState(chips=prev_chips[i]))
 
-        # 交替庄家位置
+        # Alternate dealer position
         self.dealer_pos = self.hand_count % NUM_PLAYERS
         self.hand_count += 1
 
-        sb_player = self.dealer_pos          # heads-up: 庄家=小盲
-        bb_player = 1 - self.dealer_pos      # 非庄家=大盲
+        sb_player = self.dealer_pos          # heads-up: dealer = small blind
+        bb_player = 1 - self.dealer_pos      # non-dealer = big blind
 
-        # 下盲注
+        # Post blinds
         sb_amount = min(SMALL_BLIND, self.players[sb_player].chips)
         bb_amount = min(BIG_BLIND, self.players[bb_player].chips)
 
@@ -148,16 +150,16 @@ class GameEngine:
         self.players[bb_player].total_bet = bb_amount
         self.pot = sb_amount + bb_amount
 
-        # 发底牌
+        # Deal hole cards
         for i in range(NUM_PLAYERS):
             self.players[i].hole_cards = self.deck.deal(HOLE_CARDS_PER_PLAYER)
 
-        # Preflop: heads-up 中小盲先行动
+        # Preflop: in heads-up, small blind acts first
         self.betting_level = 0
         self.raises_this_round = 0
         self.current_player = sb_player
 
-        # 标记大盲已"有下注"但尚未"主动行动"
+        # Mark big blind as having a bet but not yet acted
         self.players[sb_player].acted_this_round = False
         self.players[bb_player].acted_this_round = False
 
@@ -165,20 +167,21 @@ class GameEngine:
 
     def step(self, action: int) -> tuple[Observation, float, bool, dict]:
         """
-        执行当前玩家的动作。
+        Execute current player's action.
 
         Args:
             action: FOLD / CALL / RAISE
 
         Returns:
             (observation, reward, done, info)
-            - observation: 下一个需要行动的玩家的观测 (或最终状态)
-            - reward: 当前玩家的即时奖励 (稀疏奖励，通常为0)
-            - done: 这手牌是否结束
-            - info: 额外信息字典
+            - observation: Observation for the next player to act (or final state)
+            - reward: Immediate reward for current player (sparse, usually 0)
+            - done: Whether this hand is over
+            - info: Additional information dict
         """
         if self.hand_over:
-            raise RuntimeError("Hand is already over. Call reset_hand() first.")
+            raise RuntimeError(
+                "Hand is already over. Call reset_hand() first.")
 
         player = self.current_player
         other = 1 - player
@@ -189,7 +192,8 @@ class GameEngine:
                 f"Legal: {[ACTION_NAMES[a] for a in self.get_legal_actions()]}"
             )
 
-        info = {"action": action, "player": player, "action_name": ACTION_NAMES[action]}
+        info = {"action": action, "player": player,
+                "action_name": ACTION_NAMES[action]}
 
         # ---- FOLD ----
         if action == FOLD:
@@ -210,9 +214,9 @@ class GameEngine:
 
         # ---- RAISE ----
         elif action == RAISE:
-            # 首次下注 (post-flop 无既有下注时) 不计为 raise
+            # First bet (post-flop with no existing bet) does not count as raise
             if self.betting_level < 0:
-                # 开局下注: 设为 level 0, 不算加注次数
+                # Opening bet: set to level 0, does not count as raise
                 self.betting_level = 0
             else:
                 self.raises_this_round += 1
@@ -220,38 +224,39 @@ class GameEngine:
 
             new_bet = BETTING_LEVELS[self.betting_level]
             raise_amount = new_bet - self.players[player].round_bet
-            raise_amount = max(0, min(raise_amount, self.players[player].chips))
+            raise_amount = max(
+                0, min(raise_amount, self.players[player].chips))
             self._player_bet(player, raise_amount)
             self.players[player].acted_this_round = True
-            # 加注后对手需要重新行动
+            # After raise, opponent needs to act again
             self.players[other].acted_this_round = False
 
-        # ---- 检查下注轮是否结束 ----
+        # ---- Check if betting round is over ----
         if self._is_round_over():
             if self.current_round == RIVER:
-                # 最后一轮结束，进入开牌
+                # Last round over, proceed to showdown
                 self.hand_over = True
                 result = self._resolve_hand()
                 obs = self._get_observation(player)
                 reward = result.rewards.get(player, 0)
                 return obs, reward, True, {**info, "result": result}
             else:
-                # 进入下一轮
+                # Advance to next round
                 self._advance_round()
                 obs = self._get_observation(self.current_player)
                 return obs, 0.0, False, info
         else:
-            # 切换到对手行动
+            # Switch to opponent's turn
             self.current_player = other
             obs = self._get_observation(self.current_player)
             return obs, 0.0, False, info
 
     def get_legal_actions(self) -> list[int]:
-        """返回当前玩家的合法动作列表"""
+        """Return legal actions for the current player"""
         actions = [FOLD, CALL]
-        # 检查是否还能加注
+        # Check if raising is still allowed
         if self.raises_this_round < MAX_RAISES:
-            # 还需检查筹码是否够加注
+            # Also check if player has enough chips to raise
             if self.betting_level < 0:
                 next_level = 0
             else:
@@ -265,10 +270,10 @@ class GameEngine:
 
     def run_hand(self) -> HandResult:
         """
-        运行完整一手牌，直到开牌或一方弃牌。
+        Run a complete hand until showdown or one player folds.
 
         Returns:
-            HandResult: 这手牌的结果
+            HandResult: result of this hand
         """
         obs = self.reset_hand()
         done = False
@@ -282,28 +287,28 @@ class GameEngine:
 
     def run(self, num_hands: int = 1000) -> list[HandResult]:
         """
-        批量运行多手牌。
+        Run multiple hands in batch.
 
         Args:
-            num_hands: 运行手数
+            num_hands: number of hands to play
 
         Returns:
-            每手牌的结果列表
+            List of results for each hand
         """
         results = []
         for _ in range(num_hands):
             result = self.run_hand()
             results.append(result)
-            # 保留筹码到下一手 (若玩家破产则重置)
+            # Retain chips to next hand (reset if player goes bankrupt)
             for i in range(NUM_PLAYERS):
                 if self.players[i].chips <= 0:
                     self.players[i].chips = STARTING_CHIPS
         return results
 
-    # ==================== 内部方法 ====================
+    # ==================== Internal Methods ====================
 
     def _player_bet(self, player: int, amount: int) -> None:
-        """玩家下注 (从筹码移至底池)"""
+        """Player places a bet (moves chips to pot)"""
         actual = min(amount, self.players[player].chips)
         self.players[player].chips -= actual
         self.players[player].round_bet += actual
@@ -311,37 +316,37 @@ class GameEngine:
         self.pot += actual
 
     def _is_round_over(self) -> bool:
-        """判断当前下注轮是否结束"""
-        # 如果有人弃牌，轮次结束 (但 hand_over 已经在 step 中设置了)
-        # 两人都已行动 且 下注额相等
+        """Check if current betting round is over"""
+        # If someone folded, round is over (but hand_over was already set in step)
+        # Both players acted and bets are equal
         all_acted = all(p.acted_this_round for p in self.players)
         bets_equal = self.players[0].round_bet == self.players[1].round_bet
         return all_acted and bets_equal
 
     def _advance_round(self) -> None:
-        """从当前轮次推进到下一轮 (翻公共牌 + 重置下注状态)"""
+        """Advance from current round to next (deal community cards + reset betting state)"""
         self.current_round += 1
 
-        # 重置每轮下注状态
+        # Reset per-round betting state
         for p in self.players:
             p.round_bet = 0
             p.acted_this_round = False
         self.raises_this_round = 0
 
-        # 翻公共牌
+        # Deal community cards
         if self.current_round == FLOP:
             self.community_cards += self.deck.deal(3)
-            self.betting_level = -1  # 尚未有人下注
+            self.betting_level = -1  # No one has bet yet
         elif self.current_round in (TURN, RIVER):
             self.community_cards += self.deck.deal(1)
             self.betting_level = -1
 
-        # Post-flop: 非庄家先行动 (heads-up 中是大盲位)
+        # Post-flop: non-dealer acts first (big blind in heads-up)
         self.current_player = 1 - self.dealer_pos
 
     def _resolve_hand(self) -> HandResult:
         """
-        开牌结算: 评估手牌、分配底池。
+        Showdown settlement: evaluate hands, distribute pot.
 
         Returns:
             HandResult
@@ -356,13 +361,14 @@ class GameEngine:
                 )
                 player_hands[i] = (rank, class_str)
             else:
-                player_hands[i] = (None, "Folded" if self.players[i].folded else "N/A")
+                player_hands[i] = (
+                    None, "Folded" if self.players[i].folded else "N/A")
 
-        # 确定赢家
+        # Determine winner
         active = [i for i in range(NUM_PLAYERS) if not self.players[i].folded]
 
         if len(active) == 1:
-            # 一方弃牌
+            # One player folded
             winner = active[0]
             hand_class = "Opponent Folded"
         elif len(active) == 2:
@@ -381,7 +387,7 @@ class GameEngine:
             winner = None
             hand_class = "N/A"
 
-        # 分配底池
+        # Distribute pot
         if winner is not None:
             self.players[winner].chips += self.pot
             for i in range(NUM_PLAYERS):
@@ -390,7 +396,7 @@ class GameEngine:
                 else:
                     rewards[i] = -self.players[i].total_bet
         else:
-            # 平局: 平分底池
+            # Tie: split pot
             half = self.pot // 2
             for i in active:
                 self.players[i].chips += half
@@ -410,13 +416,13 @@ class GameEngine:
 
     def _get_observation(self, player: int) -> Observation:
         """
-        构建给定玩家的观测信息。
+        Build observation for the given player.
 
-        对应 MDP: s = (H_code, P_code, B_level, Pos)
+        Corresponds to MDP: s = (H_code, P_code, B_level, Pos)
         """
         other = 1 - player
 
-        # 计算当前需要跟注的金额
+        # Calculate current amount to call
         if self.betting_level >= 0:
             current_bet = BETTING_LEVELS[self.betting_level]
         else:
@@ -438,7 +444,7 @@ class GameEngine:
             raises_this_round=self.raises_this_round,
         )
 
-        # 按需计算 equity (有公共牌时)
+        # Compute equity on demand (when community cards are available)
         if len(self.community_cards) >= 3:
             try:
                 obs.equity = compute_equity(
@@ -451,7 +457,7 @@ class GameEngine:
         return obs
 
     def get_legal_actions_for(self, player: int) -> list[int]:
-        """返回指定玩家的合法动作列表"""
+        """Return legal actions for the specified player"""
         actions = [FOLD, CALL]
         if self.raises_this_round < MAX_RAISES:
             if self.betting_level < 0:
@@ -465,13 +471,15 @@ class GameEngine:
                     actions.append(RAISE)
         return actions
 
-    # ==================== 显示与调试 ====================
+    # ==================== Display & Debug ====================
 
     def display_state(self) -> str:
-        """返回当前游戏状态的可读字符串"""
+        """Return a human-readable string of the current game state"""
         lines = []
-        lines.append(f"=== Round: {ROUND_NAMES.get(self.current_round, '?')} ===")
-        lines.append(f"Pot: {self.pot}  |  Betting Level: {self.betting_level}  |  Raises: {self.raises_this_round}")
+        lines.append(
+            f"=== Round: {ROUND_NAMES.get(self.current_round, '?')} ===")
+        lines.append(
+            f"Pot: {self.pot}  |  Betting Level: {self.betting_level}  |  Raises: {self.raises_this_round}")
         lines.append(f"Community: {cards_to_pretty(self.community_cards)}")
         for i in range(NUM_PLAYERS):
             p = self.players[i]

@@ -1,35 +1,130 @@
-# agents/expert_agent.py - 基于 OpenSpiel CFR 的纳什均衡专家策略 (占位)
+# agents/expert_agent.py - Nash equilibrium expert strategy based on custom CFR
+
+from __future__ import annotations
+import random
+import os
 
 from agents.base_agent import BaseAgent
 from game.engine import Observation
+from game.constants import FOLD, CALL, RAISE
+from game.cfr_solver import CFRSolver
+
+
+# Default policy file path
+_DEFAULT_POLICY_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "cfr_policy.pkl"
+)
 
 
 class ExpertAgent(BaseAgent):
     """
-    基于 OpenSpiel CFR 算法的纳什均衡基准 Agent。
+    Nash equilibrium baseline Agent based on custom CFR (Counterfactual Regret Minimization).
 
-    实现要点:
-      - 使用 OpenSpiel 加载简化德州扑克游戏定义
-      - 运行 CFR 迭代计算近似纳什均衡策略
-      - 根据当前信息集采样动作
+    Key implementation details:
+      - Uses External Sampling MCCFR to solve approximate Nash equilibrium for minimalist Texas Hold'em
+      - Trained policy cached to file, loaded on subsequent runs
+      - Queries action probability distribution from strategy table based on current information set
+        (hole_bucket, community_bucket, round, bet_level, raises), then samples by probability
 
-    TODO: 接入 OpenSpiel CFR 实现
+    Usage:
+        # First use: train and save
+        agent = ExpertAgent(train_iterations=50000)
+
+        # Subsequent use: auto-load from file
+        agent = ExpertAgent()
     """
 
-    def __init__(self, name: str = "ExpertAgent"):
+    def __init__(
+        self,
+        name: str = "ExpertAgent",
+        policy_path: str | None = None,
+        train_iterations: int = 0,
+    ):
+        """
+        Args:
+            name: Agent name
+            policy_path: policy file path, None uses default path
+            train_iterations: if > 0 and policy file doesn't exist, train for specified iterations
+        """
         super().__init__(name=name)
+        self.policy_path = policy_path or _DEFAULT_POLICY_PATH
+        self.solver = CFRSolver()
+        self._policy_loaded = False
+
+        # Try to load existing policy
+        if os.path.exists(self.policy_path):
+            self.solver.load_policy(self.policy_path)
+            self._policy_loaded = True
+        elif train_iterations > 0:
+            print(
+                f"[ExpertAgent] Training CFR for {train_iterations} iterations...")
+            self.solver.train(iterations=train_iterations)
+            self.solver.save_policy(self.policy_path)
+            self._policy_loaded = True
 
     def act(self, obs: Observation) -> int:
-        # 占位: 暂时使用简单启发式
-        if obs.equity > 0.6 and RAISE_OBS(obs):
-            return 2  # RAISE
-        elif obs.equity > 0.3:
-            return 1  # CALL
+        """
+        Select action based on CFR policy.
+
+        Samples by probability from the strategy table's probability distribution,
+        falls back to equity-based heuristic if info set was never seen.
+        """
+        legal_actions = obs.legal_actions
+
+        if self._policy_loaded:
+            probs = self.solver.get_action_prob(
+                player=obs.position,
+                hole_cards=obs.hole_cards,
+                community_cards=obs.community_cards,
+                betting_round=obs.current_round,
+                betting_level=obs.betting_level,
+                raises_this_round=obs.raises_this_round,
+                legal_actions=legal_actions,
+            )
+
+            # Sample by probability
+            r = random.random()
+            cum = 0.0
+            for a in legal_actions:
+                cum += probs[a]
+                if r <= cum:
+                    return a
+            return legal_actions[-1]
+
+        # No policy: equity-based heuristic
+        return self._heuristic_act(obs)
+
+    def _heuristic_act(self, obs: Observation) -> int:
+        """Equity-based heuristic strategy (fallback when no CFR policy)"""
+        legal = obs.legal_actions
+
+        if obs.equity > 0.65:
+            # Strong hand: prefer raise
+            if RAISE in legal:
+                return RAISE
+            return CALL
+        elif obs.equity > 0.4:
+            # Medium hand: mostly call
+            return CALL
+        elif obs.equity > 0.25:
+            # Weak hand: depends on situation
+            if obs.current_bet <= 10:
+                return CALL
+            return FOLD
         else:
-            return 0  # FOLD
+            # Very weak: fold
+            return FOLD
 
+    def train(self, iterations: int = 50000, save: bool = True) -> None:
+        """
+        Manually trigger CFR training.
 
-def RAISE_OBS(obs: Observation) -> bool:
-    """检查当前观测下 RAISE 是否为合法动作"""
-    from game.constants import RAISE
-    return RAISE in obs.legal_actions
+        Args:
+            iterations: number of training iterations
+            save: whether to save policy after training
+        """
+        self.solver.train(iterations=iterations)
+        self._policy_loaded = True
+        if save:
+            self.solver.save_policy(self.policy_path)

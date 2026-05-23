@@ -1,4 +1,4 @@
-# agents/sarsa_agent.py - SARSA 在线时序差分学习 Agent (占位)
+# agents/sarsa_agent.py - SARSA online temporal-difference learning Agent (placeholder)
 
 from agents.base_agent import BaseAgent
 from game.engine import Observation
@@ -6,20 +6,20 @@ from game.engine import Observation
 
 class SARSAAgent(BaseAgent):
     """
-    SARSA (State-Action-Reward-State-Action) 在线 on-policy Q 学习 Agent。
+    SARSA (State-Action-Reward-State-Action) online on-policy Q-learning Agent.
 
-    核心公式:
+    Core formula:
       δ_t = R + γ·Q(s',a') - Q(s,a)
       Q(s,a) ← Q(s,a) + α·δ_t
 
-    状态编码: s = (H_code, P_code, B_level, Pos)
-    动作空间: A = {Fold(0), Call(1), Raise(2)}
+    State encoding: s = (H_code, P_code, B_level, Pos)
+    Action space: A = {Fold(0), Call(1), Raise(2)}
 
-    超参数:
+    Hyperparameters:
       γ = 0.95, α = 0.1
-      ε ← max(0.01, ε · 0.999)  (ε-greedy 探索衰减)
+      ε ← max(0.01, ε · 0.999)  (ε-greedy exploration decay)
 
-    TODO: 实现 Q-table、状态编码、SARSA 更新逻辑
+    TODO: Implement Q-table, state encoding, SARSA update logic
     """
 
     def __init__(self, name: str = "SARSAAgent"):
@@ -30,28 +30,29 @@ class SARSAAgent(BaseAgent):
         self.gamma = 0.95
 
     def act(self, obs: Observation) -> int:
-        # 占位: ε-greedy 策略
+        # Placeholder: ε-greedy policy
         import random
         if random.random() < self.epsilon:
             return random.choice(obs.legal_actions)
-        # TODO: 从 Q-table 中选择最优动作
-        return 1  # CALL (默认)
+        # TODO: Select optimal action from Q-table
+        return 1  # CALL (default)
 
     def update(self, obs, action, reward, next_obs, done):
-        # TODO: 实现 SARSA 更新
+        # TODO: Implement SARSA update
         self.epsilon = max(0.01, self.epsilon * 0.999)
 
     def _encode_state(self, obs: Observation) -> tuple:
         """
-        将 Observation 编码为 Q-table 的状态键。
+        Encode Observation into a Q-table state key.
 
         s = (H_code, P_code, B_level, Pos)
-        H_code: equity 离散化为 20 个 bin
-        P_code: 公共牌强度编码
-        B_level: 下注等级
-        Pos: 位置
+        H_code: equity discretized into 20 bins
+        P_code: community card strength encoding
+        B_level: betting level
+        Pos: position
         """
         from game.evaluator import equity_to_bin
         h_code = equity_to_bin(obs.equity)
-        p_code = len(obs.community_cards)  # 简化: 用公共牌数量表示阶段
+        # Simplified: use community card count to represent stage
+        p_code = len(obs.community_cards)
         return (h_code, p_code, obs.betting_level, obs.position)
