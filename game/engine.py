@@ -382,7 +382,7 @@ class GameEngine:
             elif result == -1:
                 winner = 1
             else:
-                winner = None  # 平局
+                winner = None  # Tie
         else:
             winner = None
             hand_class = "N/A"

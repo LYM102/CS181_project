@@ -17,9 +17,10 @@ class BayesianMCAgent(BaseAgent):
          Likelihood P(A|H,B) obtained via two-stage interaction statistics (Laplace smoothing)
 
       2. Improved MC stage:
-         State s = (S, B, O)
+         State s = (S, B, Pot_bin, O)
          S: own hand equity discrete encoding
          B: betting level
+         Pot_bin: pot size discretized into 6 bins
          O: opponent belief label (argmax posterior probability)
 
     TODO: Implement Bayesian inference, likelihood pre-training, MC Q-table update

@@ -171,3 +171,26 @@ def equity_to_bin(equity: float, num_bins: int = 20) -> int:
         bin index: 0 ~ num_bins-1
     """
     return min(int(equity * num_bins), num_bins - 1)
+
+
+# Pot size thresholds for discretization
+POT_BINS = [30, 60, 120, 240, 480]
+
+
+def pot_to_bin(pot: int) -> int:
+    """
+    Discretize pot size into bin index (for Q-table state encoding).
+
+    Bins: [0, 30], (30, 60], (60, 120], (120, 240], (240, 480], (480, +inf)
+    Total 6 bins (indices 0~5).
+
+    Args:
+        pot: current total pot size
+
+    Returns:
+        bin index: 0 ~ 5
+    """
+    for i, threshold in enumerate(POT_BINS):
+        if pot <= threshold:
+            return i
+    return len(POT_BINS)

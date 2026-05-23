@@ -146,7 +146,7 @@ class CFRSolver:
         p0_acted: bool, p1_acted: bool,
         reach_probs: list[float],
         remaining_deck: list[int],
-        traversing_player: int,  # 正在遍历的玩家 (对手采样的参考)
+        traversing_player: int,  # The player being traversed (reference for opponent sampling)
     ) -> list[float]:
         """External Sampling MCCFR recursion"""
 

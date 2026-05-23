@@ -37,7 +37,7 @@ CS181_project/
 | Parameter      | Value             | Description                              |
 | -------------- | ----------------- | ---------------------------------------- |
 | Game mode      | 2-player AI vs AI | Heads-up Limit Texas Hold'em             |
-| Deck           | 16 cards          | 2 suits (♠♥) × 8 ranks (7,8,9,T,J,Q,K,A) |
+| Deck           | 16 cards          | 2 suits (s/h) × 8 ranks (7,8,9,T,J,Q,K,A) |
 | Starting chips | 1000              | Per player                               |
 | Blinds         | SB=5, BB=10       | Heads-up: dealer = small blind           |
 | Betting levels | {10, 20, 40, 80}  | Corresponding to B_level 0~3             |
@@ -104,14 +104,19 @@ Straight Flush > Four of a Kind > Full House > Flush > Straight > High Card
 
 ### 3.1 State Space
 
-$$s = (H_{\text{code}},\; P_{\text{code}},\; B_{\text{level}},\; Pos)$$
+$$s = (H_{\text{code}},\; P_{\text{code}},\; B_{\text{level}},\; Pot_{\text{bin}},\; Pos)$$
 
 | Component | Meaning         | Encoding                                 |
 | --------- | --------------- | ---------------------------------------- |
 | H_code    | Own hand equity | Discretized into 20 bins (equity_to_bin) |
 | P_code    | Community info  | Community card count / treys rank code   |
 | B_level   | Betting level   | {0, 1, 2, 3} → {10, 20, 40, 80}          |
+| Pot_bin   | Total pot size  | 6 bins: [0,30], (30,60], (60,120], (120,240], (240,480], (480,+inf) |
 | Pos       | Seat position   | {0, 1}                                   |
+
+**State space size**: 20 × 4 × 4 × 6 × 2 = **3840** (compact enough for tabular methods)
+
+**Why Pot_bin is needed**: B_level only reflects the current round's bet level, but decision-making depends on pot odds (cost-to-call / total pot). Two identical (H_code, B_level) situations can have vastly different optimal actions depending on whether the pot is small (35) or large (200).
 
 ### 3.2 Reward Function
 
@@ -153,6 +158,7 @@ Built on `treys` library's `Card.new()` for integer card representation:
 | `compare_hands(hole1, hole2, community)` | Returns (1/0/-1, winner_hand_class)              |
 | `compute_equity(hole, community, sim=0)` | Win rate; sim=0 = exact enum, else MC sample     |
 | `equity_to_bin(equity, bins=20)`         | Discretize [0,1] equity to bin index             |
+| `pot_to_bin(pot)`                        | Discretize pot size into 6 bins (0~5)            |
 
 The 16-card deck keeps exact enumeration computationally feasible.
 
@@ -221,9 +227,9 @@ Fields available to Agent in `act()`:
 | Agent       | Core Method                                      | State Encoding                                                |
 | ----------- | ------------------------------------------------ | ------------------------------------------------------------- |
 | Expert      | External Sampling MCCFR → approximate Nash eq.   | Info set (hole_bucket, comm_bucket, round, bet_level, raises) |
-| SARSA       | Q(s,a) online TD update                          | (H_code, P_code, B_level, Pos)                                |
-| Bayesian-MC | Bayesian inference on opponent hand → MC Q-table | (S, B, O), O = argmax posterior                               |
-| NN-MC       | BNN (MC Dropout) predicts opponent → MC Q-table  | (S, B, O_NN), O_NN = BNN argmax                               |
+| SARSA       | Q(s,a) online TD update                          | (H_code, P_code, B_level, Pot_bin, Pos)                       |
+| Bayesian-MC | Bayesian inference on opponent hand → MC Q-table | (S, B, Pot_bin, O), O = argmax posterior                      |
+| NN-MC       | BNN (MC Dropout) predicts opponent → MC Q-table  | (S, B, Pot_bin, O_NN), O_NN = BNN argmax                      |
 
 ---
 

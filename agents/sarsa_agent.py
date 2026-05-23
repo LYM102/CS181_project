@@ -45,14 +45,16 @@ class SARSAAgent(BaseAgent):
         """
         Encode Observation into a Q-table state key.
 
-        s = (H_code, P_code, B_level, Pos)
+        s = (H_code, P_code, B_level, Pot_bin, Pos)
         H_code: equity discretized into 20 bins
         P_code: community card strength encoding
         B_level: betting level
+        Pot_bin: pot size discretized into 6 bins
         Pos: position
         """
-        from game.evaluator import equity_to_bin
+        from game.evaluator import equity_to_bin, pot_to_bin
         h_code = equity_to_bin(obs.equity)
         # Simplified: use community card count to represent stage
         p_code = len(obs.community_cards)
-        return (h_code, p_code, obs.betting_level, obs.position)
+        pot_bin = pot_to_bin(obs.pot)
+        return (h_code, p_code, obs.betting_level, pot_bin, obs.position)

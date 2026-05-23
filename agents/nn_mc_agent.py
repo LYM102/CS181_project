@@ -25,9 +25,10 @@ class NN_MCAgent(BaseAgent):
       - Opponent hand strength distribution → argmax → O_NN
 
     MC Q-table state:
-      s = (S, B, O_NN)
+      s = (S, B, Pot_bin, O_NN)
       S: equity discretized into 20 bins
       B: betting level {0,1,2,3}
+      Pot_bin: pot size discretized into 6 bins
       O_NN: BNN predicted opponent belief label
 
     TODO: Implement BNN network structure, MC Dropout inference, Q-table update
