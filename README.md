@@ -1,223 +1,419 @@
-# Minimalist Texas Hold'em
+# Minimalist Texas Hold'em — Project Structure & Implementation Guide
+
+## 1 Directory Structure
+
+```
+CS181_project/
+├── main.py                     # Entry point (3 run modes: interactive, evaluate, step)
+├── requirements.txt            # Python dependencies
+├── cfr_policy.pkl              # Pre-trained CFR strategy cache
+├── README.md                   # Project paper / documentation
+├── struct.md                   # This file: structure & implementation guide
+│
+├── game/                       # ====== Core Game Module ======
+│   ├── __init__.py
+│   ├── constants.py            # Game constants (deck, blinds, betting levels, action codes)
+│   ├── card.py                 # Deck class + treys card utility functions
+│   ├── evaluator.py            # Hand evaluation, comparison, equity computation
+│   ├── engine.py               # Game engine: deal → betting rounds → showdown
+│   └── cfr_solver.py           # Custom CFR solver (External Sampling MCCFR)
+│
+└── agents/                     # ====== Agent Implementations ======
+    ├── __init__.py
+    ├── base_agent.py           # Abstract base class (unified interface)
+    ├── random_agent.py         # Random strategy Agent (testing baseline)
+    ├── expert_agent.py         # Expert Agent (custom CFR Nash equilibrium strategy)
+    ├── sarsa_agent.py          # SARSA online TD learning Agent
+    ├── bayesian_mc_agent.py    # Bayesian inference + MC Q-table Agent
+    └── nn_mc_agent.py          # BNN (MC Dropout) + MC Q-table Agent
+```
 
-> YimingLi CunyuanZhang JiruiYu HaojiaZhang
+---
 
+## 2 Game Rules
 
-## 1 Game Rules
+### 2.1 Basic Setup
 
-### 1.1 Basic Settings
+| Parameter      | Value             | Description                              |
+| -------------- | ----------------- | ---------------------------------------- |
+| Game mode      | 2-player AI vs AI | Heads-up Limit Texas Hold'em             |
+| Deck           | 16 cards          | 2 suits (♠♥) × 8 ranks (7,8,9,T,J,Q,K,A) |
+| Starting chips | 1000              | Per player                               |
+| Blinds         | SB=5, BB=10       | Heads-up: dealer = small blind           |
+| Betting levels | {10, 20, 40, 80}  | Corresponding to B_level 0~3             |
+| Max raises     | 3 per round       | Highest bet = 80                         |
 
-- **Game Mode**: Two-player AI vs AI  
-- **Deck**: 16 custom cards (two suits, 7, 8, 9, 10, J, Q, K, A)  
-- **Starting Chips**: 1000  
-- **Blinds**: Small blind 5, big blind 10  
-- **Betting Levels**: 10, 20, 40, 80 (max 3 raises, highest bet 80)
+### 2.2 Action Space
 
+$$\mathcal{A} = \{0: \text{Fold},\; 1: \text{Call},\; 2: \text{Raise}\}$$
 
+- **Fold (0)**: Surrender the hand; opponent wins the pot
+- **Call (1)**: Match the current bet level; if no one has bet yet (post-flop first action), Call acts as Check
+- **Raise (2)**: Increase betting level by one and pay the difference; illegal when max level or 3-raise limit is reached
 
-### 1.2 Procedure and Actions
+### 2.3 Game Flow
 
-- Each player is dealt 2 private hole cards; 3 community cards are revealed on the flop, and the showdown uses 5 community cards.  
-- Legal action set:  
-  $$
-  \mathcal{A} = \{0:\text{Fold},\;1:\text{Call},\;2:\text{Raise}\}
-  $$
+```
+1. Post blinds
+   - Dealer (dealer_pos) posts small blind 5
+   - Non-dealer posts big blind 10
 
-### 1.3 Hand Rankings
+2. Preflop
+   - Deal 2 hole cards to each player
+   - Dealer (small blind) acts first
+   - Betting level starts at 0 (amount = 10)
 
-$$
-\text{Straight Flush} > \text{Four of a Kind} > \text{Full House} > \text{Flush} > \text{Straight} > \text{High Card}
-$$
+3. Flop
+   - Deal 3 community cards
+   - Non-dealer acts first
+   - Betting level resets (first bet starts at level 0)
 
-> We use the `treys` library for card representation and hand ranking.(*license:MIT*)
+4. Turn
+   - Deal 1 community card
+   - Same action order as Flop
 
+5. River
+   - Deal 1 community card (total 5)
+   - Same action order as Flop
 
+6. Showdown
+   - Best 5-card combination from 2 hole + 5 community cards
+   - Evaluated by treys library (lower rank = stronger)
+   - Winner takes the pot; loser loses their total bet
+```
 
-### 1.4 Rationale for Rule Simplification
+### 2.4 Hand Rankings
 
-The deck compression from 52 cards to 16 cards, together with the discrete betting cap, is **not an arbitrary trade-off** but a deliberate design driven by two computational concerns:
+Possible hand types in the 16-card deck (strongest to weakest):
 
-1. **Hand-strength evaluation cost**  
-   The `treys`-based equity / hand-rank computation requires enumerating possible board completions. With a 52-card deck the enumeration grows combinatorially (e.g. $\binom{45}{2}$ remaining unknowns at the turn), making per-step strength evaluation prohibitively expensive inside a table-based RL training loop. Reducing the deck to 16 cards shrinks this enumeration by orders of magnitude.
+```
+Straight Flush > Four of a Kind > Full House > Flush > Straight > High Card
+```
 
-2. **Bayesian posterior enumeration cost**  
-   The Bayesian-MC Agent (Section 4.3) computes the posterior over opponent hand strength by enumerating all consistent opponent hole-card combinations conditioned on the visible cards. For a 52-card deck this enumeration is too large for online updates during self-play; the 16-card deck makes the marginalization tractable.
+> Note: One Pair and Three of a Kind are still possible with 16 cards (2 suits × 8 ranks). treys evaluates them correctly.
 
-The resulting setting is essentially equivalent to the well-studied *Limit Texas Hold'em* variant and preserves the full structure of an imperfect-information game, so it remains a faithful testbed for the methods compared in this project.
+### 2.5 Heads-up Special Rules
 
+- Dealer = Small Blind, acts first preflop
+- Non-dealer = Big Blind, acts first post-flop
+- Dealer position alternates after each hand
 
+---
 
-## 2 MDP Mathematical Modeling
+## 3 MDP Formulation
 
-### 2.1 State Space
+### 3.1 State Space
 
-A state $s \in \mathcal{S}$ is composed of a 4-tuple, preserving raw card information (no manual compression):
+$$s = (H_{\text{code}},\; P_{\text{code}},\; B_{\text{level}},\; Pos)$$
 
-$$
-s = (H_{\text{code}},\;P_{\text{code}},\;B_{\text{level}},\;Pos)
-$$
+| Component | Meaning         | Encoding                                 |
+| --------- | --------------- | ---------------------------------------- |
+| H_code    | Own hand equity | Discretized into 20 bins (equity_to_bin) |
+| P_code    | Community info  | Community card count / treys rank code   |
+| B_level   | Betting level   | {0, 1, 2, 3} → {10, 20, 40, 80}          |
+| Pos       | Seat position   | {0, 1}                                   |
 
-- $H_{\text{code}}$: player's hole cards equity code
-- $P_{\text{code}}$: visible community cards  
-- $B_{\text{level}} \in \{0,1,2,3\}$: betting level  
-- $Pos \in \{0,1\}$: player position
+### 3.2 Reward Function
 
+Sparse reward, given only at hand termination:
 
+$$R = \begin{cases} P_{\text{pot}} & \text{win} \\ -B_{\text{own}} & \text{lose} \\ 0 & \text{tie} \end{cases}$$
 
-### 2.2 Reward Function
+### 3.3 Hyperparameters
 
-Sparse reward is given only at the end of a hand:
+$$\gamma = 0.95,\quad \alpha = 0.1,\quad \varepsilon \leftarrow \max(0.01,\; \varepsilon \cdot 0.999)$$
 
-$$
-R =
-\begin{cases}
-P_{\text{sum}} & \text{Hand win} \\
--B_{\text{own}} & \text{Hand loss} \\
-0 & \text{Tie}
-\end{cases}
-$$
+---
 
-- $P_{\text{sum}}$: total pot size  
-- $B_{\text{own}}$: total amount bet by the player in this hand
+## 4 Core Module Details
 
-### 2.3 Other Hyperparameters
+### 4.1 game/constants.py — Game Constants
 
-$$
-\gamma = 0.95,\qquad \alpha = 0.1,\qquad \varepsilon \leftarrow \max(0.01,\; \varepsilon \cdot 0.999)
-$$
+Centralized game parameters (single point of modification):
 
+- `SUITS = ['s', 'h']` — spades, hearts
+- `RANKS = ['7', '8', '9', 'T', 'J', 'Q', 'K', 'A']` — 8 ranks
+- `BETTING_LEVELS = [10, 20, 40, 80]` — 4-level betting
+- `MAX_RAISES = 3` — per-round raise limit
+- Action codes: `FOLD=0, CALL=1, RAISE=2`
+- Round codes: `PREFLOP=0, FLOP=1, TURN=2, RIVER=3`
 
+### 4.2 game/card.py — Cards & Deck
 
-## 3 Basic Reinforcement Learning Formulas
+Built on `treys` library's `Card.new()` for integer card representation:
 
-### 3.1 Action-Value Function
+- **Deck class**: Initialize 16 cards → `reset()` shuffle → `deal(n)` draw
+- **Utility functions**: `card_to_str`, `card_to_pretty`, `build_full_deck()`
 
-$$
-Q(s,a) = \mathbb{E}\left[G_t \mid S_t = s, A_t = a\right]
-$$
+### 4.3 game/evaluator.py — Hand Evaluation & Comparison
 
-### 3.2 Bellman Equation
+| Function                                 | Description                                      |
+| ---------------------------------------- | ------------------------------------------------ |
+| `evaluate_hand(hole, community)`         | Returns (rank, class_str); lower rank = stronger |
+| `compare_hands(hole1, hole2, community)` | Returns (1/0/-1, winner_hand_class)              |
+| `compute_equity(hole, community, sim=0)` | Win rate; sim=0 = exact enum, else MC sample     |
+| `equity_to_bin(equity, bins=20)`         | Discretize [0,1] equity to bin index             |
 
-$$
-Q(s,a) = \mathbb{E}\left[R_{t+1} + \gamma Q(s',a')\right]
-$$
+The 16-card deck keeps exact enumeration computationally feasible.
 
-### 3.3 $\varepsilon$-Greedy Policy
+### 4.4 game/engine.py — Game Engine
 
-$$
-A_t =
-\begin{cases}
-\text{Random}(\mathcal{A}) & \xi < \varepsilon \\
-\arg\max_{a} Q(s,a) & \xi \ge \varepsilon
-\end{cases},
-\qquad \xi \sim U(0,1)
-$$
+**Data structures**:
 
+- `PlayerState`: chips, hole cards, bets, fold status
+- `Observation`: Agent-observable state (corresponds to MDP state s)
+- `HandResult`: Settlement result of one hand
 
+**Two calling interfaces**:
 
-## 4 Agent Implementation Logic
+1. **Step-based (RL training)**:
+   ```python
+   obs = engine.reset_hand()
+   obs, reward, done, info = engine.step(action)
+   ```
 
-### 4.1 Expert Agent
+2. **Hand-based (evaluation/tournament)**:
+   ```python
+   result = engine.run_hand()
+   results = engine.run(1000)
+   ```
 
-This agent leverages the OpenSpiel library (by Google DeepMind) to provide a top-tier benchmark strategy. It approximates the Nash Equilibrium using the CFR (Counterfactual Regret Minimization) algorithm.
+**Betting logic**:
 
+- Preflop: betting_level starts at 0 (BB=10 already posted), can raise from level 0
+- Post-flop: `betting_level = -1` means "no bet yet"; first Raise sets level 0, Call acts as Check
+- Each round resets `round_bet`, `acted_this_round`, `raises_this_round`
 
-### 4.2 SARSA Agent
+---
 
-#### Core Formulas
+## 5 Agent Interface Design
 
-Temporal difference error:
-$$
-\delta_t = R + \gamma Q(s',a') - Q(s,a)
-$$
-Update rule:
-$$
-Q(s,a) \leftarrow Q(s,a) + \alpha \cdot \delta_t
-$$
+### 5.1 BaseAgent Abstract Class
 
-#### Implementation Logic
+```python
+class BaseAgent(ABC):
+    def act(self, obs: Observation) -> int      # Required: select action
+    def reset(self) -> None                      # Optional: reset internal state
+    def update(self, obs, action, reward, next_obs, done)  # Optional: online learning
+```
 
-Sample $(s,a,r,s',a')$ at each step, update Q-value online in real time, on-policy.
+### 5.2 Observation Fields
 
+Fields available to Agent in `act()`:
 
+| Field               | Type      | Description                     |
+| ------------------- | --------- | ------------------------------- |
+| `hole_cards`        | list[int] | Own hole cards (treys integers) |
+| `community_cards`   | list[int] | Current community cards         |
+| `pot`               | int       | Total pot                       |
+| `current_bet`       | int       | Current amount to call          |
+| `player_chips`      | int       | Own remaining chips             |
+| `opponent_chips`    | int       | Opponent remaining chips        |
+| `betting_level`     | int       | Betting level (0~3)             |
+| `current_round`     | int       | Current round (0~3)             |
+| `position`          | int       | Seat (0 or 1)                   |
+| `legal_actions`     | list[int] | Legal action list               |
+| `raises_this_round` | int       | Raises made this round          |
+| `equity`            | float     | Current hand equity             |
 
-### 4.3 Bayesian-Monte Carlo Hybrid Agent
-#### 4.3.1 Bayesian Inference Basic Formula
+### 5.3 Agent Summary
 
-$$
-P(H \mid A,B) = \frac{P(A \mid H,B)\cdot P(H)}{\sum_{i} P(A \mid H_i,B)\cdot P(H_i)}
-$$
-Where:
-- $H\in\{H_\text{strong},H_\text{mid},H_\text{weak}\}$: discrete opponent hand strength level
-- $A$: observable action taken by the opponent
-- $B\in\{0,1,2,3\}$: current betting level
-- $P(H)$: uniform prior probability of opponent hand strength at the start of each round
-- $P(A\mid H,B)$: opponent action likelihood function under specific hand strength and betting level
+| Agent       | Core Method                                      | State Encoding                                                |
+| ----------- | ------------------------------------------------ | ------------------------------------------------------------- |
+| Expert      | External Sampling MCCFR → approximate Nash eq.   | Info set (hole_bucket, comm_bucket, round, bet_level, raises) |
+| SARSA       | Q(s,a) online TD update                          | (H_code, P_code, B_level, Pos)                                |
+| Bayesian-MC | Bayesian inference on opponent hand → MC Q-table | (S, B, O), O = argmax posterior                               |
+| NN-MC       | BNN (MC Dropout) predicts opponent → MC Q-table  | (S, B, O_NN), O_NN = BNN argmax                               |
 
+---
 
+## 6 Expert Agent Implementation
 
+### 6.1 CFR Algorithm Core
 
-#### 4.3.2 Data-Driven Likelihood Estimation
-Abandon artificially customized fixed likelihood functions. This paper adopts a **two-stage interaction statistics method** to obtain real opponent behavioral likelihood:
-1. **Likelihood pre-training stage**
-Adopt a random policy agent to interact fully with the fixed heuristic opponent agent. Record the opponent’s real hand strength, current betting level and corresponding executed actions in each interaction step.
-2. **Frequency-based probability calculation**
-Count action occurrence frequency under grouped conditions, and apply Laplace smoothing to avoid zero probability:
-$$
-P(A\mid H,B)=\frac{N(H,B,A)+1}{N_\text{total}(H,B)+3}
-$$
+**Counterfactual Regret Minimization (CFR)** iteratively minimizes "counterfactual regret" to approximate Nash equilibrium:
 
+1. **Counterfactual regret**: Extra utility gained at info set I if player always chose action a instead of current strategy
+2. **Regret Matching**: Compute strategy from cumulative regrets; more-regretted actions become less likely
+3. **Average strategy**: Weighted average of all iteration strategies converges to Nash equilibrium
 
+### 6.2 External Sampling MCCFR
 
-#### 4.3.3 State Space Definition For MC Method
-Different from the original single-agent Monte Carlo method, the improved state incorporates the inferred opponent belief information:
-$$
-s = \big(S, B, O\big)
-$$
-- $S$: self-owned hand strength equity code
-- $B$: current game betting level
-- $O$: opponent belief label, determined by taking the category with the maximum posterior probability calculated by Bayesian inference
+To reduce traversal cost, we use the **External Sampling** variant:
 
-> We hope we can use the Bayesian inference result to guess the opponent’s hand strength, and then use the MC method to learn the optimal action.
+| Decision Type         | Processing Method           |
+| --------------------- | --------------------------- |
+| Current player action | Traverse all legal actions  |
+| Opponent action       | **Sample** one via strategy |
+| Dealing (Chance)      | **Sample** community cards  |
 
-### 4.4 NN-Monte Carlo Agent
+This reduces per-iteration node count from exponential to linear. 30k iterations ≈ 2 minutes.
 
-#### 4.4.1 Motivation
+### 6.3 Information Set Design
 
-The Bayesian‑MC agent (Section 4.3) only uses the opponent’s **current action** to update hand strength belief. This makes it incapable of detecting multi‑step patterns, such as a bluff that involves a check on the flop followed by a raise on the turn. Extending the discrete Bayesian model to a full Hidden Markov Model (HMM) is possible but cumbersome.
+```
+info_key = (player, hole_bucket, community_bucket,
+            betting_round, betting_level, raises_this_round)
+```
 
-We therefore replace the Bayesian inference with a small **Bayesian Neural Network (BNN)** using MC Dropout. The BNN takes a **window of recent actions** (along with other observable features) and outputs a distribution over opponent hand strength. Its argmax provides the opponent label $O_{\text{NN}}$, which is then used in the same MC Q‑table structure.
+| Component         | Encoding | Description                                |
+| ----------------- | -------- | ------------------------------------------ |
+| player            | 0/1      | Player ID                                  |
+| hole_bucket       | 0~9      | Preflop equity discretized into 10 buckets |
+| community_bucket  | 0/3/4/5  | Community card count (encodes game stage)  |
+| betting_round     | 0~3      | Preflop/Flop/Turn/River                    |
+| betting_level     | -1~3     | Bet level (-1=no bet yet, 0~3=levels)      |
+| raises_this_round | 0~3      | Raises made this round                     |
 
-#### 4.4.2 BNN Architecture & Input Features
+**Key design decision**: In Limit Hold'em, betting state is fully determined by (betting_level, raises_this_round) — no need for full action history. This reduces info set count from hundreds of thousands to ~200.
 
-**Motivation for round-wise structuring**: A flat sliding window over recent actions cannot tell whether a *Raise* happened **before or after a new community card was revealed**. Yet exactly this distinction is the key signal of multi-step bluffs (e.g. *flop check → turn raise*). We therefore organize action history into **per-round 2-D matrices**, so that pre-community and post-community actions are processed separately.
+### 6.4 Preflop Equity Cache
 
-**Per-round action matrices**:
+120 hole card combinations (C(16,2)) are pre-computed at first training:
+- MC sampling (per opponent hand × 8 board samples) instead of exact enumeration
+- ~0.02s per combo, ~2s total for full cache
+- O(1) info set lookup after caching
 
-$$
-M_{\text{opp}} \in \mathbb{R}^{R \times k},\qquad M_{\text{self}} \in \mathbb{R}^{R \times k}
-$$
+### 6.5 Benchmark Results
 
-- $R = 4$: betting rounds (preflop / flop / turn / river)
-- $k = 4$: max action slots per round (consistent with the 3-raise cap)
-- Entry value: $0=\text{Fold},\;1=\text{Call},\;2=\text{Raise}$ rescaled to $[0,1]$; empty slots padded with $-1$
+500-hand match statistics (30k CFR iterations):
 
-**Input features**:
+| Matchup          | Win Rate           | Notes                             |
+| ---------------- | ------------------ | --------------------------------- |
+| Expert vs Random | **67.8%** vs 28.6% | CFR significantly beats random    |
+| Expert vs Expert | 45.6% vs 49.0%     | Near 50/50 (slight position bias) |
+| Random vs Random | ~50/50             | Symmetric control                 |
 
-| Feature                                     | Encoding                               |
-| ------------------------------------------- | -------------------------------------- |
-| Own hand equity                             | scalar in [0,1]                        |
-| Community card strength                     | scalar in [0,1] (using `treys`)        |
-| Betting round                               | one‑hot (4 dims)                       |
-| **Opponent action matrix** $M_{\text{opp}}$ | shape $R \times k$, padded with $-1$   |
-| **Own action matrix** $M_{\text{self}}$     | shape $R \times k$, padded with $-1$   |
-| New‑community‑card flag                     | binary (1 if a new round just started) |
+---
 
-Each row of $M_{\text{opp}}$ / $M_{\text{self}}$ is first encoded by a small shared 1‑D module (mean‑pool or Conv1D) to obtain a per‑round behavioral summary; these summaries are then concatenated across rounds and combined with the scalar / one‑hot features before entering the BNN. This row‑wise design lets the network capture cross‑round patterns such as **flop check → turn raise**, the canonical bluff signature.
+## 7 Design Rationale for Simplified Rules
 
-#### 4.4.3 Integration with Monte Carlo
+The 52→16 card compression + discrete betting limits simultaneously solve two computational bottlenecks:
 
-State for MC Q‑table: $s = (S, B, O_{\text{NN}})$
-- $S$: own equity discretized into 20 bins.
-- $B$: betting level $\{0,1,2,3\}$.
-- $O_{\text{NN}}$: argmax from BNN.
+1. **Hand evaluation enumeration explosion**: treys equity computation needs to enumerate possible board completions. With 52 cards the combinations are too large (e.g., C(45,2)). 16 cards makes exact enumeration feasible.
+2. **Bayesian posterior enumeration infeasible**: Bayesian-MC Agent must enumerate all opponent hand combinations for posterior computation. 16 cards enables online marginalization.
+
+This setup is equivalent to a well-studied *Limit Texas Hold'em* variant, preserving the core structure of imperfect-information games.
+
+---
+
+## 8 How to Run & Test
+
+### 8.1 Environment Setup
+
+```bash
+# Install dependencies (recommended: use conda environment)
+pip install -r requirements.txt
+```
+
+The only dependency is `treys` (poker hand evaluation library).
+
+### 8.2 Available Agent Types
+
+| Agent Key     | Class           | Description                           |
+| ------------- | --------------- | ------------------------------------- |
+| `random`      | RandomAgent     | Uniform random over legal actions     |
+| `expert`      | ExpertAgent     | CFR-trained Nash equilibrium strategy |
+| `sarsa`       | SARSAAgent      | SARSA online Q-learning (placeholder) |
+| `bayesian_mc` | BayesianMCAgent | Bayesian + MC Q-table (placeholder)   |
+| `nn_mc`       | NN_MCAgent      | BNN + MC Q-table (placeholder)        |
+
+### 8.3 Running from Command Line
+
+```bash
+# Mode 1: Interactive — watch a detailed step-by-step game
+python main.py --mode interactive --num_hands 5
+
+# Mode 2: Evaluate — batch compare two agents (statistics output)
+python main.py --mode evaluate --agent0 expert --agent1 random --num_hands 1000
+
+# Mode 3: Step — debug RL step interface (observation details)
+python main.py --mode step
+```
+
+**Example output (evaluate mode)**:
+
+```
+==============================================================
+  Evaluation: expert_p0 vs random_p1
+  Total hands: 1000
+==============================================================
+  Player 0 (expert_p0) wins: 678 (67.8%)
+  Player 1 (random_p1) wins: 286 (28.6%)
+  Ties: 36 (3.6%)
+  Avg reward P0: 12.35
+  Avg reward P1: -12.35
+```
+
+### 8.4 Running from Python Code
+
+```python
+from game.engine import GameEngine
+from agents.expert_agent import ExpertAgent
+from agents.random_agent import RandomAgent
+
+# Create agents
+expert = ExpertAgent(name="CFR_Expert")
+random_ag = RandomAgent(name="Baseline")
+
+# Run 500 hands
+engine = GameEngine(expert, random_ag)
+results = engine.run(num_hands=500)
+
+# Analyze results
+wins = sum(1 for r in results if r.winner == 0)
+print(f"Expert win rate: {wins / len(results) * 100:.1f}%")
+```
+
+### 8.5 Step-by-Step RL Interface (for Training)
+
+```python
+from game.engine import GameEngine
+from agents.random_agent import RandomAgent
+
+agent0 = RandomAgent(name="Learner")
+agent1 = RandomAgent(name="Opponent")
+engine = GameEngine(agent0, agent1)
+
+# Reset a new hand
+obs = engine.reset_hand()
+print(f"Hole cards: {obs.hole_cards_pretty}")
+print(f"Legal actions: {obs.legal_actions}")
+print(f"Equity: {obs.equity:.4f}")
+
+# Take actions step by step
+done = False
+while not done:
+    action = agent0.act(obs) if engine.current_player == 0 else agent1.act(obs)
+    obs, reward, done, info = engine.step(action)
+
+# Get result
+result = info["result"]
+print(f"Winner: Player {result.winner}, Pot: {result.pot}")
+```
+
+### 8.6 Training Expert Agent from Scratch
+
+```python
+from agents.expert_agent import ExpertAgent
+
+# Train CFR for 50000 iterations (takes ~3 minutes)
+agent = ExpertAgent(train_iterations=50000)
+# Policy auto-saved to cfr_policy.pkl
+
+# Next time, auto-loads from file (instant)
+agent = ExpertAgent()
+```
+
+### 8.7 Quick Test Commands
+
+```bash
+# Test random vs random (sanity check — should be ~50/50)
+python main.py --mode evaluate --agent0 random --agent1 random --num_hands 500
+
+# Test expert vs random (expert should win ~65-70%)
+python main.py --mode evaluate --agent0 expert --agent1 random --num_hands 500
+
+# Watch a single hand interactively
+python main.py --mode interactive --num_hands 1
+```
