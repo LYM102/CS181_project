@@ -17,7 +17,7 @@ from game.constants import ACTION_NAMES, ROUND_NAMES
 from game.card import cards_to_pretty
 from agents.random_agent import RandomAgent
 from agents.expert_agent import ExpertAgent
-from agents.sarsa_agent import SARSAAgent
+from agents.sarsa_agent import QLearningAgent
 from agents.bayesian_mc_agent import BayesianMCAgent
 from agents.nn_mc_agent import NN_MCAgent
 
@@ -26,7 +26,7 @@ from agents.nn_mc_agent import NN_MCAgent
 AGENT_REGISTRY = {
     "random": RandomAgent,
     "expert": ExpertAgent,
-    "sarsa": SARSAAgent,
+    "qlearning": QLearningAgent,
     "bayesian_mc": BayesianMCAgent,
     "nn_mc": NN_MCAgent,
 }

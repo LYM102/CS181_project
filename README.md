@@ -23,7 +23,7 @@ CS181_project/
     ├── base_agent.py           # Abstract base class (unified interface)
     ├── random_agent.py         # Random strategy Agent (testing baseline)
     ├── expert_agent.py         # Expert Agent (custom CFR Nash equilibrium strategy)
-    ├── sarsa_agent.py          # SARSA online TD learning Agent
+    ├── sarsa_agent.py          # Q-learning off-policy TD learning Agent
     ├── bayesian_mc_agent.py    # Bayesian inference + MC Q-table Agent
     └── nn_mc_agent.py          # BNN (MC Dropout) + MC Q-table Agent
 ```
@@ -34,14 +34,14 @@ CS181_project/
 
 ### 2.1 Basic Setup
 
-| Parameter      | Value             | Description                              |
-| -------------- | ----------------- | ---------------------------------------- |
-| Game mode      | 2-player AI vs AI | Heads-up Limit Texas Hold'em             |
+| Parameter      | Value             | Description                               |
+| -------------- | ----------------- | ----------------------------------------- |
+| Game mode      | 2-player AI vs AI | Heads-up Limit Texas Hold'em              |
 | Deck           | 16 cards          | 2 suits (s/h) × 8 ranks (7,8,9,T,J,Q,K,A) |
-| Starting chips | 1000              | Per player                               |
-| Blinds         | SB=5, BB=10       | Heads-up: dealer = small blind           |
-| Betting levels | {10, 20, 40, 80}  | Corresponding to B_level 0~3             |
-| Max raises     | 3 per round       | Highest bet = 80                         |
+| Starting chips | 1000              | Per player                                |
+| Blinds         | SB=5, BB=10       | Heads-up: dealer = small blind            |
+| Betting levels | {10, 20, 40, 80}  | Corresponding to B_level 0~3              |
+| Max raises     | 3 per round       | Highest bet = 80                          |
 
 ### 2.2 Action Space
 
@@ -106,13 +106,13 @@ Straight Flush > Four of a Kind > Full House > Flush > Straight > High Card
 
 $$s = (H_{\text{code}},\; P_{\text{code}},\; B_{\text{level}},\; Pot_{\text{bin}},\; Pos)$$
 
-| Component | Meaning         | Encoding                                 |
-| --------- | --------------- | ---------------------------------------- |
-| H_code    | Own hand equity | Discretized into 20 bins (equity_to_bin) |
-| P_code    | Community info  | Community card count / treys rank code   |
-| B_level   | Betting level   | {0, 1, 2, 3} → {10, 20, 40, 80}          |
+| Component | Meaning         | Encoding                                                            |
+| --------- | --------------- | ------------------------------------------------------------------- |
+| H_code    | Own hand equity | Discretized into 20 bins (equity_to_bin)                            |
+| P_code    | Community info  | Community card count / treys rank code                              |
+| B_level   | Betting level   | {0, 1, 2, 3} → {10, 20, 40, 80}                                     |
 | Pot_bin   | Total pot size  | 6 bins: [0,30], (30,60], (60,120], (120,240], (240,480], (480,+inf) |
-| Pos       | Seat position   | {0, 1}                                   |
+| Pos       | Seat position   | {0, 1}                                                              |
 
 **State space size**: 20 × 4 × 4 × 6 × 2 = **3840** (compact enough for tabular methods)
 
@@ -227,7 +227,7 @@ Fields available to Agent in `act()`:
 | Agent       | Core Method                                      | State Encoding                                                |
 | ----------- | ------------------------------------------------ | ------------------------------------------------------------- |
 | Expert      | External Sampling MCCFR → approximate Nash eq.   | Info set (hole_bucket, comm_bucket, round, bet_level, raises) |
-| SARSA       | Q(s,a) online TD update                          | (H_code, P_code, B_level, Pot_bin, Pos)                       |
+| Q-learning  | Q(s,a) off-policy TD update (max over next)      | (H_code, P_code, B_level, Pot_bin, Pos)                       |
 | Bayesian-MC | Bayesian inference on opponent hand → MC Q-table | (S, B, Pot_bin, O), O = argmax posterior                      |
 | NN-MC       | BNN (MC Dropout) predicts opponent → MC Q-table  | (S, B, Pot_bin, O_NN), O_NN = BNN argmax                      |
 
@@ -320,7 +320,7 @@ The only dependency is `treys` (poker hand evaluation library).
 | ------------- | --------------- | ------------------------------------- |
 | `random`      | RandomAgent     | Uniform random over legal actions     |
 | `expert`      | ExpertAgent     | CFR-trained Nash equilibrium strategy |
-| `sarsa`       | SARSAAgent      | SARSA online Q-learning (placeholder) |
+| `qlearning`   | QLearningAgent  | Q-learning off-policy TD control      |
 | `bayesian_mc` | BayesianMCAgent | Bayesian + MC Q-table (placeholder)   |
 | `nn_mc`       | NN_MCAgent      | BNN + MC Q-table (placeholder)        |
 
