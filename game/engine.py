@@ -316,9 +316,17 @@ class GameEngine:
         self.pot += actual
 
     def _is_round_over(self) -> bool:
-        """Check if current betting round is over"""
-        # If someone folded, round is over (but hand_over was already set in step)
-        # Both players acted and bets are equal
+        """
+        Check if current betting round is over.
+
+        Conditions:
+        1. If any player is all-in (chips == 0), the round ends immediately.
+        2. Both players have acted in this round AND their bets are equal.
+        """
+        # All‑in shortcut
+        if self.players[0].chips == 0 or self.players[1].chips == 0:
+            return True
+
         all_acted = all(p.acted_this_round for p in self.players)
         bets_equal = self.players[0].round_bet == self.players[1].round_bet
         return all_acted and bets_equal

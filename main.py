@@ -17,7 +17,7 @@ from game.constants import ACTION_NAMES, ROUND_NAMES
 from game.card import cards_to_pretty
 from agents.random_agent import RandomAgent
 from agents.expert_agent import ExpertAgent
-from agents.sarsa_agent import QLearningAgent
+from agents.sarsa_agent import SarsaAgent
 from agents.bayesian_mc_agent import BayesianMCAgent
 from agents.nn_mc_agent import NN_MCAgent
 
@@ -26,18 +26,21 @@ from agents.nn_mc_agent import NN_MCAgent
 AGENT_REGISTRY = {
     "random": RandomAgent,
     "expert": ExpertAgent,
-    "qlearning": QLearningAgent,
+    "sarsa": SarsaAgent,
     "bayesian_mc": BayesianMCAgent,
     "nn_mc": NN_MCAgent,
 }
 
 
-def create_agent(agent_type: str, player_id: int):
+
+def create_agent(agent_type: str, player_id: int, model_path: str = None):
     """Create Agent instance from type string"""
     if agent_type not in AGENT_REGISTRY:
         raise ValueError(
             f"Unknown agent type: {agent_type}. Available: {list(AGENT_REGISTRY.keys())}")
     cls = AGENT_REGISTRY[agent_type]
+    if agent_type == "sarsa" and model_path:
+        return cls(name=f"{agent_type}_p{player_id}", load_q_table_path=model_path)
     return cls(name=f"{agent_type}_p{player_id}")
 
 
@@ -94,10 +97,19 @@ def run_interactive(num_hands: int = 1, verbose: bool = True):
             f"  Player {i} ({engine.agents[i].name}): {engine.players[i].chips}")
 
 
-def run_evaluation(agent0_type: str, agent1_type: str, num_hands: int = 1000):
+def run_evaluation(agent0_type: str, agent1_type: str, num_hands: int,
+                   sarsa_model0: str = None, sarsa_model1: str = None):
     """Batch evaluate match performance between two Agents"""
-    agent0 = create_agent(agent0_type, 0)
-    agent1 = create_agent(agent1_type, 1)
+    agent0 = create_agent(agent0_type, 0, 
+                          model_path=sarsa_model0 if agent0_type == "sarsa" else None)
+    agent1 = create_agent(agent1_type, 1,
+                          model_path=sarsa_model1 if agent1_type == "sarsa" else None)
+    
+    if agent0_type == "sarsa":
+        agent0.epsilon = 0.0
+    if agent1_type == "sarsa":
+        agent1.epsilon = 0.0
+
     engine = GameEngine(agent0, agent1)
 
     results = engine.run(num_hands=num_hands)
@@ -176,12 +188,17 @@ if __name__ == "__main__":
                         help="Number of hands to play")
     parser.add_argument("--verbose", action="store_true", default=True,
                         help="Verbose output")
+    parser.add_argument("--sarsa_model0", type=str, default=None,
+                        help="Path to saved Q-table for SARSA agent 0")
+    parser.add_argument("--sarsa_model1", type=str, default=None,
+                        help="Path to saved Q-table for SARSA agent 1")
 
     args = parser.parse_args()
 
     if args.mode == "interactive":
         run_interactive(num_hands=args.num_hands, verbose=args.verbose)
-    elif args.mode == "evaluate":
-        run_evaluation(args.agent0, args.agent1, num_hands=args.num_hands)
+    elif args.mode == "evaluate":    
+        run_evaluation(args.agent0, args.agent1, args.num_hands,
+                   args.sarsa_model0, args.sarsa_model1)
     elif args.mode == "step":
         run_step_by_step()

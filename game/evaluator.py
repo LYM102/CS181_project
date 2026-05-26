@@ -1,13 +1,19 @@
 # game/evaluator.py - Hand evaluation and comparison (based on treys library)
 
+from functools import lru_cache
+import random
 from itertools import combinations
 from treys import Card, Evaluator
 from game.card import build_full_deck
 
-
 # Global evaluator (treys Evaluator is stateless, can be reused)
 _evaluator = Evaluator()
 
+# Full deck of 16 cards (two suits, 7..A) for equity calculation
+FULL_DECK = build_full_deck()
+
+
+# ==================== Basic Hand Evaluation ====================
 
 def evaluate_hand(hole_cards: list[int], community_cards: list[int]) -> tuple[int, str]:
     """
@@ -60,43 +66,20 @@ def compare_hands(
         return 0, "Tie"
 
 
-def compute_equity(
-    hole_cards: list[int],
-    community_cards: list[int],
-    num_simulations: int = 0,
-) -> float:
-    """
-    Compute hand win rate (equity).
-
-    For the 16-card small deck, performs exact enumeration when num_simulations=0;
-    otherwise uses Monte Carlo sampling.
-
-    Args:
-        hole_cards: own hole cards
-        community_cards: revealed community cards
-        num_simulations: Monte Carlo sample count, 0 means exact enumeration
-
-    Returns:
-        equity: win rate [0, 1]
-    """
-    known_cards = set(hole_cards + community_cards)
-    remaining = [c for c in build_full_deck() if c not in known_cards]
-
-    cards_to_deal = 5 - len(community_cards)
-
-    if num_simulations == 0:
-        return _compute_equity_exact(hole_cards, community_cards, remaining, cards_to_deal)
-    else:
-        return _compute_equity_mc(hole_cards, community_cards, remaining, cards_to_deal, num_simulations)
-
+# ==================== Equity Calculation ====================
 
 def _compute_equity_exact(
     hole_cards: list[int],
     community_cards: list[int],
-    remaining: list[int],
-    cards_to_deal: int,
 ) -> float:
-    """Exact enumeration to compute equity"""
+    """
+    Exact enumeration to compute equity.
+    Used when num_simulations=0.
+    """
+    known_cards = set(hole_cards + community_cards)
+    remaining = [c for c in FULL_DECK if c not in known_cards]
+    cards_to_deal = 5 - len(community_cards)
+
     wins = 0
     ties = 0
     total = 0
@@ -109,55 +92,88 @@ def _compute_equity_exact(
         if cards_to_deal == 0:
             # Community cards complete, compare directly
             full_community = community_cards
+            result, _ = compare_hands(hole_cards, opp_cards, full_community)
+            if result == 1:
+                wins += 1
+            elif result == 0:
+                ties += 1
+            total += 1
         else:
             for extra in combinations(remaining_after_opp, cards_to_deal):
                 full_community = community_cards + list(extra)
-                result, _ = compare_hands(
-                    hole_cards, opp_cards, full_community)
+                result, _ = compare_hands(hole_cards, opp_cards, full_community)
                 if result == 1:
                     wins += 1
                 elif result == 0:
                     ties += 1
                 total += 1
-            continue
-
-        result, _ = compare_hands(hole_cards, opp_cards, full_community)
-        if result == 1:
-            wins += 1
-        elif result == 0:
-            ties += 1
-        total += 1
 
     return (wins + ties * 0.5) / total if total > 0 else 0.0
 
 
-def _compute_equity_mc(
-    hole_cards: list[int],
-    community_cards: list[int],
-    remaining: list[int],
-    cards_to_deal: int,
+@lru_cache(maxsize=20000)
+def _cached_equity_sampling(
+    hole_cards_tuple: tuple,
+    community_cards_tuple: tuple,
     num_simulations: int,
 ) -> float:
-    """Monte Carlo sampling to compute equity"""
-    import random
+    """
+    Monte Carlo sampling to compute equity with caching.
+    Inputs must be hashable (tuples).
+    """
+    hole_cards = list(hole_cards_tuple)
+    community_cards = list(community_cards_tuple)
+    known_cards = set(hole_cards + community_cards)
+    remaining = [c for c in FULL_DECK if c not in known_cards]
+    cards_to_deal = 5 - len(community_cards)
 
     wins = 0
     ties = 0
 
     for _ in range(num_simulations):
+        # Sample opponent hand (2 cards) + needed community cards
         sampled = random.sample(remaining, 2 + cards_to_deal)
         opp_cards = sampled[:2]
         extra_community = sampled[2:2 + cards_to_deal]
         full_community = community_cards + extra_community
 
-        result, _ = compare_hands(hole_cards, opp_cards, full_community)
-        if result == 1:
+        rank_me = _evaluator.evaluate(full_community, hole_cards)
+        rank_opp = _evaluator.evaluate(full_community, opp_cards)
+        if rank_me < rank_opp:
             wins += 1
-        elif result == 0:
+        elif rank_me == rank_opp:
             ties += 1
 
     return (wins + ties * 0.5) / num_simulations
 
+
+def compute_equity(
+    hole_cards: list[int],
+    community_cards: list[int],
+    num_simulations: int = 100,
+) -> float:
+    """
+    Compute hand win rate (equity).
+
+    Args:
+        hole_cards: own hole cards
+        community_cards: revealed community cards
+        num_simulations: Monte Carlo sample count.
+                         If 0, uses exact enumeration (slow but precise).
+                         Default is 100 (fast, good enough for RL).
+
+    Returns:
+        equity: win rate [0, 1]
+    """
+    if num_simulations == 0:
+        return _compute_equity_exact(hole_cards, community_cards)
+    else:
+        return _cached_equity_sampling(
+            tuple(hole_cards), tuple(community_cards), num_simulations
+        )
+
+
+# ==================== State Discretization ====================
 
 def equity_to_bin(equity: float, num_bins: int = 20) -> int:
     """
