@@ -1,4 +1,4 @@
-# main.py - Minimalist Texas Hold'em external entry point
+# main.py - Standard Texas Hold'em AI Platform (52-card)
 
 """
 Usage examples:
@@ -17,27 +17,33 @@ from game.constants import ACTION_NAMES, ROUND_NAMES
 from game.card import cards_to_pretty
 from agents.random_agent import RandomAgent
 from agents.expert_agent import ExpertAgent
-from agents.sarsa_agent import QLearningAgent
-from agents.bayesian_mc_agent import BayesianMCAgent
+from agents.sarsa_agent import SarsaAgent
 from agents.nn_mc_agent import NN_MCAgent
+from agents.nfsp_agent import NFSPAgent
 
 
 # ==================== Agent Registry ====================
 AGENT_REGISTRY = {
     "random": RandomAgent,
     "expert": ExpertAgent,
-    "qlearning": QLearningAgent,
-    "bayesian_mc": BayesianMCAgent,
+    "sarsa": SarsaAgent,
     "nn_mc": NN_MCAgent,
+    "nfsp": NFSPAgent,
 }
 
 
-def create_agent(agent_type: str, player_id: int):
+def create_agent(agent_type: str, player_id: int, model_path: str = None):
     """Create Agent instance from type string"""
     if agent_type not in AGENT_REGISTRY:
         raise ValueError(
             f"Unknown agent type: {agent_type}. Available: {list(AGENT_REGISTRY.keys())}")
     cls = AGENT_REGISTRY[agent_type]
+    if agent_type == "sarsa" and model_path:
+        return cls(name=f"{agent_type}_p{player_id}", load_q_table_path=model_path)
+    if agent_type == "nn_mc" and model_path:
+        return cls(name=f"{agent_type}_p{player_id}", load_model_path=model_path)
+    if agent_type == "nfsp" and model_path:
+        return cls(name=f"{agent_type}_p{player_id}", load_model_path=model_path)
     return cls(name=f"{agent_type}_p{player_id}")
 
 
@@ -94,26 +100,69 @@ def run_interactive(num_hands: int = 1, verbose: bool = True):
             f"  Player {i} ({engine.agents[i].name}): {engine.players[i].chips}")
 
 
-def run_evaluation(agent0_type: str, agent1_type: str, num_hands: int = 1000):
+def run_evaluation(agent0_type: str, agent1_type: str, num_hands: int,
+                   sarsa_model0: str = None, sarsa_model1: str = None,
+                   nn_mc_model0: str = None, nn_mc_model1: str = None):
     """Batch evaluate match performance between two Agents"""
-    agent0 = create_agent(agent0_type, 0)
-    agent1 = create_agent(agent1_type, 1)
+    model0 = sarsa_model0 if agent0_type == "sarsa" else (nn_mc_model0 if agent0_type == "nn_mc" else None)
+    model1 = sarsa_model1 if agent1_type == "sarsa" else (nn_mc_model1 if agent1_type == "nn_mc" else None)
+    agent0 = create_agent(agent0_type, 0, model_path=model0)
+    agent1 = create_agent(agent1_type, 1, model_path=model1)
+
+    if agent0_type in ("sarsa", "nn_mc"):
+        agent0.epsilon = 0.0
+    if agent1_type in ("sarsa", "nn_mc"):
+        agent1.epsilon = 0.0
+
     engine = GameEngine(agent0, agent1)
 
-    results = engine.run(num_hands=num_hands)
+    # If any agent is nn_mc, use custom loop that records ALL actions
+    # (self + opponent) for BNN feature consistency with training.
+    has_nn_mc = agent0_type == "nn_mc" or agent1_type == "nn_mc"
 
-    # Statistics
     wins = defaultdict(int)
     ties = 0
     total_reward = defaultdict(float)
 
-    for r in results:
-        if r.winner is not None:
-            wins[r.winner] += 1
-        else:
-            ties += 1
-        for pid in range(2):
-            total_reward[pid] += r.rewards[pid]
+    if has_nn_mc:
+        # Disable auto-record in act() — eval loop handles ALL action tracking
+        for a in engine.agents:
+            if hasattr(a, '_auto_record_self'):
+                a._auto_record_self = False
+        for _ in range(num_hands):
+            for a in engine.agents:
+                if hasattr(a, 'reset'):
+                    a.reset()
+            obs = engine.reset_hand()
+            done = False
+            while not done:
+                cp = engine.current_player
+                action = engine.agents[cp].act(obs)
+                round_before = obs.current_round
+                obs, reward, done, info = engine.step(action)
+                # Record action for nn_mc agents (both self and opponent)
+                for pid in range(2):
+                    if hasattr(engine.agents[pid], 'record_action'):
+                        engine.agents[pid].record_action(
+                            cp, action, round_before)
+
+            result = info.get("result")
+            if result:
+                if result.winner is not None:
+                    wins[result.winner] += 1
+                else:
+                    ties += 1
+                for pid in range(2):
+                    total_reward[pid] += result.rewards[pid]
+    else:
+        results = engine.run(num_hands=num_hands)
+        for r in results:
+            if r.winner is not None:
+                wins[r.winner] += 1
+            else:
+                ties += 1
+            for pid in range(2):
+                total_reward[pid] += r.rewards[pid]
 
     print(f"\n{'='*60}")
     print(f"  Evaluation: {agent0.name} vs {agent1.name}")
@@ -164,7 +213,7 @@ def run_step_by_step():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Minimalist Texas Hold'em AI Platform")
+        description="Standard Texas Hold'em AI Platform (52-card)")
     parser.add_argument("--mode", type=str, default="interactive",
                         choices=["interactive", "evaluate", "step"],
                         help="Run mode: interactive, evaluate (batch evaluation), step (step-by-step)")
@@ -176,12 +225,22 @@ if __name__ == "__main__":
                         help="Number of hands to play")
     parser.add_argument("--verbose", action="store_true", default=True,
                         help="Verbose output")
+    parser.add_argument("--sarsa_model0", type=str, default=None,
+                        help="Path to saved Q-table for SARSA agent 0")
+    parser.add_argument("--sarsa_model1", type=str, default=None,
+                        help="Path to saved Q-table for SARSA agent 1")
+    parser.add_argument("--nn_mc_model0", type=str, default=None,
+                        help="Path to saved model for NN_MC agent 0")
+    parser.add_argument("--nn_mc_model1", type=str, default=None,
+                        help="Path to saved model for NN_MC agent 1")
 
     args = parser.parse_args()
 
     if args.mode == "interactive":
         run_interactive(num_hands=args.num_hands, verbose=args.verbose)
     elif args.mode == "evaluate":
-        run_evaluation(args.agent0, args.agent1, num_hands=args.num_hands)
+        run_evaluation(args.agent0, args.agent1, args.num_hands,
+                   args.sarsa_model0, args.sarsa_model1,
+                   args.nn_mc_model0, args.nn_mc_model1)
     elif args.mode == "step":
         run_step_by_step()

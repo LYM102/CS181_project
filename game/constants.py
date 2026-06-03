@@ -1,9 +1,9 @@
-# game/constants.py - Minimalist Texas Hold'em game constants
+# game/constants.py - Standard Texas Hold'em game constants (52 cards)
 
 # ==================== Deck Setup ====================
-SUITS = ['s', 'h']  # spades, hearts (2 suits)
-RANKS = ['7', '8', '9', 'T', 'J', 'Q', 'K', 'A']  # 8 ranks
-DECK_SIZE = 16  # 2 suits × 8 ranks
+SUITS = ['s', 'h', 'd', 'c']  # spades, hearts, diamonds, clubs (4 suits)
+RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A']  # 13 ranks
+DECK_SIZE = 52  # 4 suits × 13 ranks
 
 # ==================== Chips & Blinds ====================
 STARTING_CHIPS = 1000
@@ -11,8 +11,8 @@ SMALL_BLIND = 5
 BIG_BLIND = 10
 
 # ==================== Betting Levels ====================
-BETTING_LEVELS = [10, 20, 40, 80]  # B_level 0~3 corresponding bet amounts
-MAX_RAISES = 3  # Max raises per round
+BETTING_LEVELS = [10, 20, 40, 80, 160, 320]  # B_level 0~5 corresponding bet amounts
+MAX_RAISES = 4  # Max raises per round
 
 # ==================== Action Encoding ====================
 FOLD = 0

@@ -1,4 +1,4 @@
-# agents/expert_agent.py - Nash equilibrium expert strategy based on custom CFR
+# agents/expert_agent.py - Nash equilibrium expert strategy based on custom CFR (52-card)
 
 from __future__ import annotations
 import random
@@ -22,7 +22,8 @@ class ExpertAgent(BaseAgent):
     Nash equilibrium baseline Agent based on custom CFR (Counterfactual Regret Minimization).
 
     Key implementation details:
-      - Uses External Sampling MCCFR to solve approximate Nash equilibrium for minimalist Texas Hold'em
+      - Uses External Sampling MCCFR to solve approximate Nash equilibrium
+        for standard 52-card heads-up Texas Hold'em
       - Trained policy cached to file, loaded on subsequent runs
       - Queries action probability distribution from strategy table based on current information set
         (hole_bucket, community_bucket, round, bet_level, raises), then samples by probability

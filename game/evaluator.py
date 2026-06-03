@@ -1,5 +1,8 @@
-# game/evaluator.py - Hand evaluation and comparison (based on treys library)
+# game/evaluator.py - Hand evaluation and comparison (based on treys library, 52 cards)
 
+from __future__ import annotations
+from functools import lru_cache
+import random
 from itertools import combinations
 from treys import Card, Evaluator
 from game.card import build_full_deck
@@ -8,189 +11,165 @@ from game.card import build_full_deck
 # Global evaluator (treys Evaluator is stateless, can be reused)
 _evaluator = Evaluator()
 
+# Full deck of 52 cards (4 suits, 2..A) for equity calculation
+FULL_DECK = build_full_deck()
+
+
+# ==================== Basic Hand Evaluation ====================
 
 def evaluate_hand(hole_cards: list[int], community_cards: list[int]) -> tuple[int, str]:
     """
     Evaluate hand strength.
 
     Args:
-        hole_cards: player's 2 hole cards (treys integer list)
-        community_cards: community card list (treys integer list)
+        hole_cards: list of 2 treys integers (own hand)
+        community_cards: list of 3/4/5 treys integers (board)
 
     Returns:
-        (rank, hand_class_str): lower rank means stronger hand, hand_class_str is hand type name
+        (rank, class_str): lower rank = stronger hand
     """
-    if len(community_cards) < 3:
-        raise ValueError(
-            f"Need at least 3 community cards to evaluate, got {len(community_cards)}")
-    rank = _evaluator.evaluate(community_cards, hole_cards)
-    hand_class = _evaluator.get_rank_class(rank)
-    class_str = _evaluator.class_to_string(hand_class)
+    rank = _evaluator.evaluate(hole_cards, community_cards)
+    class_str = _evaluator.get_rank_class(rank)
     return rank, class_str
 
 
-def compare_hands(
-    hole_cards_1: list[int],
-    hole_cards_2: list[int],
-    community_cards: list[int],
-) -> tuple[int, str]:
+def hand_class_name(rank: int) -> str:
+    """Convert treys rank to human-readable hand class name"""
+    return _evaluator.class_to_string(_evaluator.get_rank_class(rank))
+
+
+def compare_hands(hole1: list[int], hole2: list[int],
+                  community: list[int]) -> tuple[int, str]:
     """
-    Compare two hands.
+    Compare two hands over the same community cards.
 
     Args:
-        hole_cards_1: player 1's hole cards
-        hole_cards_2: player 2's hole cards
-        community_cards: community cards
+        hole1: Player 0's hole cards
+        hole2: Player 1's hole cards
+        community: Community cards
 
     Returns:
-        (result, winning_hand_class):
-            result = 1  means player 1 wins
-            result = -1 means player 2 wins
-            result = 0  means tie
-            winning_hand_class is the winner's hand type name
+        (1 if P0 wins, 0 if tie, -1 if P1 wins, best_hand_class_str)
     """
-    rank1, class1 = evaluate_hand(hole_cards_1, community_cards)
-    rank2, class2 = evaluate_hand(hole_cards_2, community_cards)
+    rank1, cls1 = evaluate_hand(hole1, community)
+    rank2, cls2 = evaluate_hand(hole2, community)
 
-    if rank1 < rank2:   # treys: lower rank = stronger
-        return 1, class1
+    if rank1 < rank2:
+        return 1, cls1
     elif rank1 > rank2:
-        return -1, class2
-    else:
-        return 0, "Tie"
+        return -1, cls2
+    return 0, cls1
 
 
-def compute_equity(
-    hole_cards: list[int],
-    community_cards: list[int],
-    num_simulations: int = 0,
-) -> float:
+# ==================== Equity Computation ====================
+
+@lru_cache(maxsize=20000)
+def _cached_equity(hole_tuple: tuple, comm_tuple: tuple, sim: int) -> float:
     """
-    Compute hand win rate (equity).
-
-    For the 16-card small deck, performs exact enumeration when num_simulations=0;
-    otherwise uses Monte Carlo sampling.
+    Cached equity computation with MC sampling.
 
     Args:
-        hole_cards: own hole cards
-        community_cards: revealed community cards
-        num_simulations: Monte Carlo sample count, 0 means exact enumeration
+        hole_tuple: tuple of 2 card ints (for caching)
+        comm_tuple: tuple of community card ints (for caching)
+        sim: number of MC samples (0 = exact enumeration when feasible)
 
     Returns:
-        equity: win rate [0, 1]
+        win_rate: float in [0, 1]
     """
-    known_cards = set(hole_cards + community_cards)
-    remaining = [c for c in build_full_deck() if c not in known_cards]
+    hole = list(hole_tuple)
+    community = list(comm_tuple)
+    used = set(hole) | set(community)
+    remaining = [c for c in FULL_DECK if c not in used]
 
-    cards_to_deal = 5 - len(community_cards)
-
-    if num_simulations == 0:
-        return _compute_equity_exact(hole_cards, community_cards, remaining, cards_to_deal)
-    else:
-        return _compute_equity_mc(hole_cards, community_cards, remaining, cards_to_deal, num_simulations)
-
-
-def _compute_equity_exact(
-    hole_cards: list[int],
-    community_cards: list[int],
-    remaining: list[int],
-    cards_to_deal: int,
-) -> float:
-    """Exact enumeration to compute equity"""
-    wins = 0
-    ties = 0
-    total = 0
-
-    # Enumerate all possible opponent hands + remaining community card completions
-    for opponent_hand in combinations(remaining, 2):
-        opp_cards = list(opponent_hand)
-        remaining_after_opp = [c for c in remaining if c not in set(opp_cards)]
-
-        if cards_to_deal == 0:
-            # Community cards complete, compare directly
-            full_community = community_cards
-        else:
-            for extra in combinations(remaining_after_opp, cards_to_deal):
-                full_community = community_cards + list(extra)
-                result, _ = compare_hands(
-                    hole_cards, opp_cards, full_community)
-                if result == 1:
-                    wins += 1
-                elif result == 0:
-                    ties += 1
+    # For very small remaining decks (< 20 cards), exact enumeration is feasible
+    if len(remaining) <= 20 and sim == 0:
+        wins = 0
+        total = 0
+        # Enumerate opponent's cards
+        for opp_hole in combinations(remaining, 2):
+            opp_set = set(opp_hole)
+            board_cards_needed = 5 - len(community)
+            remaining_for_board = [c for c in remaining if c not in opp_set]
+            for board in combinations(remaining_for_board, board_cards_needed):
+                full_board = community + list(board)
+                r1, _ = evaluate_hand(hole, full_board)
+                r2, _ = evaluate_hand(list(opp_hole), full_board)
                 total += 1
-            continue
+                if r1 < r2:
+                    wins += 1
+                elif r1 == r2:
+                    wins += 0.5
+        return wins / total if total > 0 else 0.5
 
-        result, _ = compare_hands(hole_cards, opp_cards, full_community)
-        if result == 1:
-            wins += 1
-        elif result == 0:
-            ties += 1
-        total += 1
-
-    return (wins + ties * 0.5) / total if total > 0 else 0.0
-
-
-def _compute_equity_mc(
-    hole_cards: list[int],
-    community_cards: list[int],
-    remaining: list[int],
-    cards_to_deal: int,
-    num_simulations: int,
-) -> float:
-    """Monte Carlo sampling to compute equity"""
-    import random
-
+    # Monte Carlo sampling
     wins = 0
-    ties = 0
+    for _ in range(sim):
+        # Sample opponent cards
+        opp_sample = random.sample(remaining, 2)
+        opp_set = set(opp_sample)
+        remaining_for_board = [c for c in remaining if c not in opp_set]
+        # Sample board cards needed
+        board_cards_needed = 5 - len(community)
+        if board_cards_needed > 0:
+            board_sample = random.sample(remaining_for_board, board_cards_needed)
+        else:
+            board_sample = []
+        full_board = community + board_sample
 
-    for _ in range(num_simulations):
-        sampled = random.sample(remaining, 2 + cards_to_deal)
-        opp_cards = sampled[:2]
-        extra_community = sampled[2:2 + cards_to_deal]
-        full_community = community_cards + extra_community
-
-        result, _ = compare_hands(hole_cards, opp_cards, full_community)
-        if result == 1:
+        r1, _ = evaluate_hand(hole, full_board)
+        r2, _ = evaluate_hand(list(opp_sample), full_board)
+        if r1 < r2:
             wins += 1
-        elif result == 0:
-            ties += 1
+        elif r1 == r2:
+            wins += 0.5
 
-    return (wins + ties * 0.5) / num_simulations
+    return wins / sim if sim > 0 else 0.5
 
 
-def equity_to_bin(equity: float, num_bins: int = 20) -> int:
+def compute_equity(hole_cards: list[int], community_cards: list[int],
+                   sim: int = 100) -> float:
     """
-    Discretize equity into bin index (for Q-table state encoding).
+    Compute equity (win rate) for a given hand + board.
 
     Args:
-        equity: win rate [0, 1]
-        num_bins: number of bins
+        hole_cards: list of 2 card ints
+        community_cards: list of 0~5 community card ints
+        sim: MC samples (0 for exact enumeration when feasible, default 100 for speed)
 
     Returns:
-        bin index: 0 ~ num_bins-1
+        equity: float in [0, 1]
     """
-    return min(int(equity * num_bins), num_bins - 1)
+    return _cached_equity(tuple(sorted(hole_cards)),
+                          tuple(sorted(community_cards)),
+                          sim)
 
 
-# Pot size thresholds for discretization
-POT_BINS = [30, 60, 120, 240, 480]
+# ==================== Discretization ====================
+
+def equity_to_bin(equity: float, bins: int = 20) -> int:
+    """
+    Discretize equity [0, 1] into bin index [0, bins-1].
+
+    Uses logarithmic spacing: more granular near extremes.
+    """
+    if equity <= 0.0:
+        return 0
+    if equity >= 1.0:
+        return bins - 1
+    # Logarithmic mapping
+    import math
+    idx = int(round(math.log(equity / (1 - equity + 1e-10) + 1) / math.log(2) * 3))
+    return max(0, min(bins - 1, idx))
 
 
 def pot_to_bin(pot: int) -> int:
     """
-    Discretize pot size into bin index (for Q-table state encoding).
+    Discretize pot size into 7 bins (0~6).
 
-    Bins: [0, 30], (30, 60], (60, 120], (120, 240], (240, 480], (480, +inf)
-    Total 6 bins (indices 0~5).
-
-    Args:
-        pot: current total pot size
-
-    Returns:
-        bin index: 0 ~ 5
+    Bins: [0,30], (30,60], (60,120], (120,240], (240,480], (480,960], >960
     """
-    for i, threshold in enumerate(POT_BINS):
-        if pot <= threshold:
+    thresholds = [30, 60, 120, 240, 480, 960]
+    for i, t in enumerate(thresholds):
+        if pot <= t:
             return i
-    return len(POT_BINS)
+    return len(thresholds)  # bin 6

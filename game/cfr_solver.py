@@ -1,6 +1,8 @@
 # game/cfr_solver.py - Custom CFR (Counterfactual Regret Minimization) solver
+
+from __future__ import annotations
 #
-# CFR implementation for 16-card minimalist Texas Hold'em.
+# CFR implementation for standard 52-card Texas Hold'em.
 # Uses External Sampling MCCFR + compact information set encoding.
 #
 # External Sampling:
@@ -39,14 +41,22 @@ def _card_sort_key(card: int) -> int:
     return rank_int * 10 + suit_int
 
 
-def _compute_preflop_equity(hole_cards: list[int], num_board_samples: int = 8) -> float:
-    """MC sampling to compute preflop equity"""
+def _compute_preflop_equity(hole_cards: list[int], num_opponent_samples: int = 50,
+                            num_board_samples: int = 8) -> float:
+    """MC sampling to compute preflop equity (adapted for 52-card deck)"""
     remaining = [c for c in FULL_DECK if c not in set(hole_cards)]
     wins = 0
     ties = 0
     total = 0
 
-    for opp in combinations(remaining, 2):
+    # Sample opponents instead of full enumeration (C(50,2)=1225 is too many)
+    opponent_combos = list(combinations(remaining, 2))
+    if len(opponent_combos) > num_opponent_samples:
+        sampled_opponents = random.sample(opponent_combos, num_opponent_samples)
+    else:
+        sampled_opponents = opponent_combos
+
+    for opp in sampled_opponents:
         opp_cards = list(opp)
         rem_after = [c for c in remaining if c not in set(opp_cards)]
         for _ in range(num_board_samples):
@@ -80,7 +90,7 @@ def equity_to_bucket(equity: float, num_buckets: int = 10) -> int:
 
 class CFRSolver:
     """
-    External Sampling MCCFR solver for minimalist 16-card Texas Hold'em.
+    External Sampling MCCFR solver for standard 52-card Texas Hold'em.
 
     Usage:
         solver = CFRSolver()
@@ -392,9 +402,10 @@ class CFRSolver:
         return stats
 
     def _warmup_equity_cache(self) -> None:
+        """Precompute preflop equity for all C(52,2)=1326 hole card combos."""
         if _PREFLOP_EQUITY_CACHE:
             return
-        print("  Warming up preflop equity cache...")
+        print("  Warming up preflop equity cache (52-card deck, sampling)...")
         for combo in combinations(FULL_DECK, 2):
             key = tuple(sorted(combo, key=_card_sort_key))
             if key not in _PREFLOP_EQUITY_CACHE:

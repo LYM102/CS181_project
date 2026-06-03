@@ -1,12 +1,13 @@
-# game/card.py - Poker cards and deck (based on treys library)
+# game/card.py - Poker cards and deck (based on treys library, standard 52 cards)
 
+from __future__ import annotations
 import random
 from treys import Card
 from game.constants import SUITS, RANKS, DECK_SIZE
 
 
 class Deck:
-    """16-card minimalist deck: 2 suits (s/h) x 8 ranks (7~A)"""
+    """Standard 52-card deck: 4 suits (s/h/d/c) x 13 ranks (2~A)"""
 
     def __init__(self):
         self.cards: list[int] = []
@@ -55,5 +56,5 @@ def cards_to_pretty(cards: list[int]) -> list[str]:
 
 
 def build_full_deck() -> list[int]:
-    """Build the complete 16-card list (generation only, no dealing)"""
+    """Build the complete 52-card list (generation only, no dealing)"""
     return [Card.new(f"{rank}{suit}") for suit in SUITS for rank in RANKS]
