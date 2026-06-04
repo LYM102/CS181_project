@@ -149,14 +149,16 @@ class NFSPAgent(BaseAgent):
     This converges to approximate Nash equilibrium via self-play.
     """
 
-    INPUT_DIM = 15
+    INPUT_DIM = 29  # expanded: 15 base + 12 opp_actions + 2 board_texture
     OUTPUT_DIM = 3  # Fold, Call, Raise
 
     def __init__(self, name: str = "NFSPAgent",
                  hidden_dim: int = 128,
-                 eta: float = 0.1,
+                 eta: float = 0.5,
+                 eta_decay: float = 0.99999,     # per-hand η decay (~0.37× after 100k hands)
+                 eta_min: float = 0.05,
                  epsilon: float = 0.06,
-                 gamma: float = 1.0,
+                 gamma: float = 0.95,
                  q_lr: float = 0.01,
                  policy_lr: float = 0.005,
                  batch_size: int = 128,
@@ -168,6 +170,8 @@ class NFSPAgent(BaseAgent):
         super().__init__(name=name)
 
         self.eta = eta
+        self.eta_decay = eta_decay
+        self.eta_min = eta_min
         self.epsilon = epsilon
         self.gamma = gamma
         self.batch_size = batch_size
@@ -175,7 +179,7 @@ class NFSPAgent(BaseAgent):
         self.device = device
         self.train_mode = False
 
-        # Networks (larger hidden dim for 52-card complexity)
+        # Networks (input_dim matches INPUT_DIM above)
         self.q_network = DQN(self.INPUT_DIM, hidden_dim, self.OUTPUT_DIM).to(device)
         self.target_network = DQN(self.INPUT_DIM, hidden_dim, self.OUTPUT_DIM).to(device)
         self.target_network.load_state_dict(self.q_network.state_dict())
@@ -193,6 +197,11 @@ class NFSPAgent(BaseAgent):
         self.train_steps = 0
         self._current_mode = 'average'
 
+        # Per-hand opponent action tracking (for opponent modeling features)
+        self._opp_action_counts = [0, 0, 0]  # [fold, call, raise] per round (reset each round)
+        self._opp_round_actions = {0: [0,0,0], 1: [0,0,0], 2: [0,0,0], 3: [0,0,0]}  # round→[f,c,r]
+        self._prev_round_for_opp = -1
+
         if load_model_path:
             self.load_model(load_model_path)
 
@@ -202,24 +211,13 @@ class NFSPAgent(BaseAgent):
 
     def _encode_state(self, obs: Observation) -> np.ndarray:
         """
-        Encode observation into 15-dim normalized feature vector.
+        Encode observation into 29-dim normalized feature vector (expanded from 15).
 
-        All features are derived from our game's Observation object.
-        No external poker library calls — only uses obs fields directly.
+        Features [0:15]  — base game state (same as before)
+        Features [15:27] — opponent action history (4 rounds × 3 action counts, normalized)
+        Features [27:29] — board texture (paired, flush_draw)
 
-        Features:
-          [0]     equity             : hand win rate [0,1] (from obs.equity)
-          [1]     pot_ratio          : pot / (pot + player_chips)
-          [2]     pot_odds           : call_amount / (pot + call_amount)
-          [3]     SPR                : eff_stack / max(pot,1), clipped [0,1]
-          [4:8]   round_onehot       : preflop/flop/turn/river
-          [8]     betting_level_norm : betting_level / max_level
-          [9]     raises_norm        : raises_this_round / max_raises
-          [10]    position           : dealer(0) or not(1)
-          [11]    chips_ratio        : own_chips / total_chips
-          [12]    can_raise          : 1 if RAISE in legal_actions
-          [13]    call_amount_norm   : call_needed / max_bet_level
-          [14]    community_stage    : len(community_cards) / 5.0
+        Total: 15 + 12 + 2 = 29 dims
         """
         features = np.zeros(self.INPUT_DIM, dtype=np.float32)
 
@@ -268,6 +266,29 @@ class NFSPAgent(BaseAgent):
 
         # [14] Community card stage (0/3/4/5 → 0/0.6/0.8/1.0)
         features[14] = len(obs.community_cards) / 5.0
+
+        # --- [15:27] Opponent action history (per-round action counts normalized) ---
+        max_actions_per_round = 4.0
+        for r in range(4):
+            counts = self._opp_round_actions.get(r, [0, 0, 0])
+            features[15 + r * 3 + 0] = min(counts[0] / max_actions_per_round, 1.0)  # folds
+            features[15 + r * 3 + 1] = min(counts[1] / max_actions_per_round, 1.0)  # calls
+            features[15 + r * 3 + 2] = min(counts[2] / max_actions_per_round, 1.0)  # raises
+
+        # --- [27:29] Board texture ---
+        cc = obs.community_cards
+        if len(cc) >= 3:
+            from treys import Card
+            try:
+                ranks = [Card.get_rank_int(c) for c in cc]
+                suits = [Card.get_suit_int(c) for c in cc]
+                # Paired board
+                features[27] = 1.0 if len(set(ranks)) < len(ranks) else 0.0
+                # Flush draw possible
+                max_suit_count = max(suits.count(s) for s in set(suits))
+                features[28] = 1.0 if max_suit_count >= 2 else 0.0
+            except Exception:
+                pass
 
         return features
 
@@ -419,6 +440,24 @@ class NFSPAgent(BaseAgent):
         return loss.item()
 
     # ==================================================================
+    #  Opponent Tracking & Eta Decay
+    # ==================================================================
+
+    def record_opp_action(self, round_num: int, action: int) -> None:
+        """Record opponent's action for opponent modeling features."""
+        if round_num not in self._opp_round_actions:
+            self._opp_round_actions[round_num] = [0, 0, 0]
+        if 0 <= action <= 2:
+            self._opp_round_actions[round_num][action] += 1
+
+    def decay_eta(self) -> None:
+        """Decay η (best-response probability) after each hand."""
+        self.eta = max(self.eta_min, self.eta * self.eta_decay)
+
+    def get_eta(self) -> float:
+        return self.eta
+
+    # ==================================================================
     #  Persistence
     # ==================================================================
 
@@ -442,5 +481,5 @@ class NFSPAgent(BaseAgent):
         print(f"[NFSPAgent] Model loaded from {filepath} (steps={self.train_steps})")
 
     def reset(self) -> None:
-        """No per-hand state to reset (stateless feature encoding)."""
-        pass
+        """Reset per-hand opponent action tracking."""
+        self._opp_round_actions = {0: [0,0,0], 1: [0,0,0], 2: [0,0,0], 3: [0,0,0]}

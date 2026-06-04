@@ -2,3 +2,11 @@ __pycache__/
 *.pyc
 .vscode/
 *.log
+
+# Training data & results
+logs/
+train/results/
+train/*.pt
+train/*.pkl
+venv/
+.qoder/

@@ -136,7 +136,7 @@ class SarsaAgent(BaseAgent):
             Pot_bin    : pot size discretized into 6 bins (0..5)
             Pos        : player position (0 or 1)
         """
-        h_code = equity_to_bin(obs.equity, num_bins=20)
+        h_code = equity_to_bin(obs.equity, bins=20)
         p_code = len(obs.community_cards)          # stage indicator
         pot_bin = pot_to_bin(obs.pot)
         return (h_code, p_code, obs.betting_level, pot_bin, obs.position)

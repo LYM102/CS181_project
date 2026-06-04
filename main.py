@@ -32,7 +32,8 @@ AGENT_REGISTRY = {
 }
 
 
-def create_agent(agent_type: str, player_id: int, model_path: str = None):
+def create_agent(agent_type: str, player_id: int, model_path: str = None,
+                 nfsp_model_path: str = None):
     """Create Agent instance from type string"""
     if agent_type not in AGENT_REGISTRY:
         raise ValueError(
@@ -42,8 +43,10 @@ def create_agent(agent_type: str, player_id: int, model_path: str = None):
         return cls(name=f"{agent_type}_p{player_id}", load_q_table_path=model_path)
     if agent_type == "nn_mc" and model_path:
         return cls(name=f"{agent_type}_p{player_id}", load_model_path=model_path)
-    if agent_type == "nfsp" and model_path:
-        return cls(name=f"{agent_type}_p{player_id}", load_model_path=model_path)
+    if agent_type == "nfsp":
+        load_path = nfsp_model_path or model_path
+        if load_path:
+            return cls(name=f"{agent_type}_p{player_id}", load_model_path=load_path)
     return cls(name=f"{agent_type}_p{player_id}")
 
 
@@ -102,12 +105,19 @@ def run_interactive(num_hands: int = 1, verbose: bool = True):
 
 def run_evaluation(agent0_type: str, agent1_type: str, num_hands: int,
                    sarsa_model0: str = None, sarsa_model1: str = None,
-                   nn_mc_model0: str = None, nn_mc_model1: str = None):
+                   nn_mc_model0: str = None, nn_mc_model1: str = None,
+                   nfsp_model0: str = None, nfsp_model1: str = None):
     """Batch evaluate match performance between two Agents"""
-    model0 = sarsa_model0 if agent0_type == "sarsa" else (nn_mc_model0 if agent0_type == "nn_mc" else None)
-    model1 = sarsa_model1 if agent1_type == "sarsa" else (nn_mc_model1 if agent1_type == "nn_mc" else None)
-    agent0 = create_agent(agent0_type, 0, model_path=model0)
-    agent1 = create_agent(agent1_type, 1, model_path=model1)
+    def _get_model_path(atype, sarsa_p, nn_mc_p, nfsp_p):
+        if atype == "sarsa": return sarsa_p
+        if atype == "nn_mc": return nn_mc_p
+        if atype == "nfsp": return nfsp_p
+        return None
+
+    model0 = _get_model_path(agent0_type, sarsa_model0, nn_mc_model0, nfsp_model0)
+    model1 = _get_model_path(agent1_type, sarsa_model1, nn_mc_model1, nfsp_model1)
+    agent0 = create_agent(agent0_type, 0, model_path=model0, nfsp_model_path=nfsp_model0)
+    agent1 = create_agent(agent1_type, 1, model_path=model1, nfsp_model_path=nfsp_model1)
 
     if agent0_type in ("sarsa", "nn_mc"):
         agent0.epsilon = 0.0
@@ -164,6 +174,9 @@ def run_evaluation(agent0_type: str, agent1_type: str, num_hands: int,
             for pid in range(2):
                 total_reward[pid] += r.rewards[pid]
 
+    avg_r0 = total_reward[0] / num_hands
+    avg_r1 = total_reward[1] / num_hands
+
     print(f"\n{'='*60}")
     print(f"  Evaluation: {agent0.name} vs {agent1.name}")
     print(f"  Total hands: {num_hands}")
@@ -173,8 +186,14 @@ def run_evaluation(agent0_type: str, agent1_type: str, num_hands: int,
     print(
         f"  Player 1 ({agent1.name}) wins: {wins[1]} ({wins[1]/num_hands*100:.1f}%)")
     print(f"  Ties: {ties} ({ties/num_hands*100:.1f}%)")
-    print(f"  Avg reward P0: {total_reward[0]/num_hands:.2f}")
-    print(f"  Avg reward P1: {total_reward[1]/num_hands:.2f}")
+    print(f"{'='*60}")
+    print(f"  --- Chip-Based Metrics ---")
+    print(f"  Total chips P0: {total_reward[0]:+.0f}  |  Avg chips/hand: {avg_r0:+.2f}")
+    print(f"  Total chips P1: {total_reward[1]:+.0f}  |  Avg chips/hand: {avg_r1:+.2f}")
+    if avg_r0 > avg_r1:
+        print(f"  → P0 dominates: +{avg_r0 - avg_r1:.2f} chips/hand advantage")
+    elif avg_r1 > avg_r0:
+        print(f"  → P1 dominates: +{avg_r1 - avg_r0:.2f} chips/hand advantage")
 
 
 def run_step_by_step():
@@ -233,6 +252,10 @@ if __name__ == "__main__":
                         help="Path to saved model for NN_MC agent 0")
     parser.add_argument("--nn_mc_model1", type=str, default=None,
                         help="Path to saved model for NN_MC agent 1")
+    parser.add_argument("--nfsp_model0", type=str, default=None,
+                        help="Path to saved model for NFSP agent 0")
+    parser.add_argument("--nfsp_model1", type=str, default=None,
+                        help="Path to saved model for NFSP agent 1")
 
     args = parser.parse_args()
 
@@ -241,6 +264,7 @@ if __name__ == "__main__":
     elif args.mode == "evaluate":
         run_evaluation(args.agent0, args.agent1, args.num_hands,
                    args.sarsa_model0, args.sarsa_model1,
-                   args.nn_mc_model0, args.nn_mc_model1)
+                   args.nn_mc_model0, args.nn_mc_model1,
+                   args.nfsp_model0, args.nfsp_model1)
     elif args.mode == "step":
         run_step_by_step()
