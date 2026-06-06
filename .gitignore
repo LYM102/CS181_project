@@ -10,3 +10,4 @@ train/*.pt
 train/*.pkl
 venv/
 .qoder/
+.venv/

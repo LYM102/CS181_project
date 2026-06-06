@@ -11,6 +11,7 @@ Usage examples:
 
 import argparse
 from collections import defaultdict
+from agents.bayesian_agent import BayesianAgent
 
 from game.engine import GameEngine
 from game.constants import ACTION_NAMES, ROUND_NAMES
@@ -29,6 +30,7 @@ AGENT_REGISTRY = {
     "sarsa": SarsaAgent,
     "nn_mc": NN_MCAgent,
     "nfsp": NFSPAgent,
+    "bayesian": BayesianAgent,
 }
 
 
@@ -41,12 +43,22 @@ def create_agent(agent_type: str, player_id: int, model_path: str = None,
     cls = AGENT_REGISTRY[agent_type]
     if agent_type == "sarsa" and model_path:
         return cls(name=f"{agent_type}_p{player_id}", load_q_table_path=model_path)
+
     if agent_type == "nn_mc" and model_path:
         return cls(name=f"{agent_type}_p{player_id}", load_model_path=model_path)
+
     if agent_type == "nfsp":
         load_path = nfsp_model_path or model_path
         if load_path:
             return cls(name=f"{agent_type}_p{player_id}", load_model_path=load_path)
+
+    if agent_type == "bayesian":
+        if model_path:
+            agent = cls(name=f"{agent_type}_p{player_id}", load_model_path=model_path)
+            agent.player_id = player_id
+            return agent
+        return cls(name=f"{agent_type}_p{player_id}", player_id=player_id)
+
     return cls(name=f"{agent_type}_p{player_id}")
 
 
@@ -106,35 +118,47 @@ def run_interactive(num_hands: int = 1, verbose: bool = True):
 def run_evaluation(agent0_type: str, agent1_type: str, num_hands: int,
                    sarsa_model0: str = None, sarsa_model1: str = None,
                    nn_mc_model0: str = None, nn_mc_model1: str = None,
-                   nfsp_model0: str = None, nfsp_model1: str = None):
+                   nfsp_model0: str = None, nfsp_model1: str = None,
+                   bayesian_model0: str = None, bayesian_model1: str = None):
     """Batch evaluate match performance between two Agents"""
-    def _get_model_path(atype, sarsa_p, nn_mc_p, nfsp_p):
-        if atype == "sarsa": return sarsa_p
-        if atype == "nn_mc": return nn_mc_p
-        if atype == "nfsp": return nfsp_p
+    def _get_model_path(atype, sarsa_p, nn_mc_p, nfsp_p, bayesian_p):
+        if atype == "sarsa":
+            return sarsa_p
+        if atype == "nn_mc":
+            return nn_mc_p
+        if atype == "nfsp":
+            return nfsp_p
+        if atype == "bayesian":
+            return bayesian_p
         return None
 
-    model0 = _get_model_path(agent0_type, sarsa_model0, nn_mc_model0, nfsp_model0)
-    model1 = _get_model_path(agent1_type, sarsa_model1, nn_mc_model1, nfsp_model1)
+    model0 = _get_model_path(agent0_type, sarsa_model0, nn_mc_model0, nfsp_model0, bayesian_model0)
+    model1 = _get_model_path(agent1_type, sarsa_model1, nn_mc_model1, nfsp_model1, bayesian_model1)
+
+
     agent0 = create_agent(agent0_type, 0, model_path=model0, nfsp_model_path=nfsp_model0)
     agent1 = create_agent(agent1_type, 1, model_path=model1, nfsp_model_path=nfsp_model1)
 
-    if agent0_type in ("sarsa", "nn_mc"):
+    if agent0_type in ("sarsa", "nn_mc", "bayesian"):
         agent0.epsilon = 0.0
-    if agent1_type in ("sarsa", "nn_mc"):
+    if agent1_type in ("sarsa", "nn_mc", "bayesian"):
         agent1.epsilon = 0.0
 
     engine = GameEngine(agent0, agent1)
 
-    # If any agent is nn_mc, use custom loop that records ALL actions
-    # (self + opponent) for BNN feature consistency with training.
-    has_nn_mc = agent0_type == "nn_mc" or agent1_type == "nn_mc"
+    # If any agent needs action recording, use custom loop that records ALL actions.
+    # NN_MC uses it for BNN features.
+    # Bayesian uses it for posterior belief updates.
+    needs_action_recording = (
+        agent0_type in ("nn_mc", "bayesian")
+        or agent1_type in ("nn_mc", "bayesian")
+    )
 
     wins = defaultdict(int)
     ties = 0
     total_reward = defaultdict(float)
 
-    if has_nn_mc:
+    if needs_action_recording:
         # Disable auto-record in act() — eval loop handles ALL action tracking
         for a in engine.agents:
             if hasattr(a, '_auto_record_self'):
@@ -149,12 +173,22 @@ def run_evaluation(agent0_type: str, agent1_type: str, num_hands: int,
                 cp = engine.current_player
                 action = engine.agents[cp].act(obs)
                 round_before = obs.current_round
+                bet_level_before = obs.betting_level
+
                 obs, reward, done, info = engine.step(action)
-                # Record action for nn_mc agents (both self and opponent)
+
+                # Record action for agents that need action history.
+                # BayesianAgent needs bet_level; NN_MCAgent only accepts round_num.
                 for pid in range(2):
                     if hasattr(engine.agents[pid], 'record_action'):
-                        engine.agents[pid].record_action(
-                            cp, action, round_before)
+                        try:
+                            engine.agents[pid].record_action(
+                                cp, action, round_before, bet_level_before
+                            )
+                        except TypeError:
+                            engine.agents[pid].record_action(
+                                cp, action, round_before
+                            )
 
             result = info.get("result")
             if result:
@@ -256,6 +290,10 @@ if __name__ == "__main__":
                         help="Path to saved model for NFSP agent 0")
     parser.add_argument("--nfsp_model1", type=str, default=None,
                         help="Path to saved model for NFSP agent 1")
+    parser.add_argument("--bayesian_model0", type=str, default=None,
+                        help="Path to saved model for Bayesian agent 0")
+    parser.add_argument("--bayesian_model1", type=str, default=None,
+                        help="Path to saved model for Bayesian agent 1")
 
     args = parser.parse_args()
 
@@ -265,6 +303,8 @@ if __name__ == "__main__":
         run_evaluation(args.agent0, args.agent1, args.num_hands,
                    args.sarsa_model0, args.sarsa_model1,
                    args.nn_mc_model0, args.nn_mc_model1,
-                   args.nfsp_model0, args.nfsp_model1)
+                   args.nfsp_model0, args.nfsp_model1,
+                   args.bayesian_model0, args.bayesian_model1)
+
     elif args.mode == "step":
         run_step_by_step()
