@@ -96,6 +96,55 @@ class ExpertAgent(BaseAgent):
         # No policy: equity-based heuristic
         return self._heuristic_act(obs)
 
+    def get_action_probs(self, obs: Observation) -> list[float]:
+        """
+        Return CFR mixed strategy probability distribution [P(FOLD), P(CALL), P(RAISE)]
+        for the given observation. Used for knowledge distillation.
+        """
+        if self._policy_loaded:
+            return self.solver.get_action_prob(
+                player=obs.position,
+                hole_cards=obs.hole_cards,
+                community_cards=obs.community_cards,
+                betting_round=obs.current_round,
+                betting_level=obs.betting_level,
+                raises_this_round=obs.raises_this_round,
+                legal_actions=obs.legal_actions,
+            )
+        # Fallback: heuristic mixed strategy
+        return self._heuristic_probs(obs)
+
+    def _heuristic_probs(self, obs: Observation) -> list[float]:
+        """Equity-based heuristic mixed strategy (fallback)."""
+        legal = obs.legal_actions
+        probs = [0.0, 0.0, 0.0]
+        if obs.equity > 0.65:
+            if RAISE in legal:
+                probs[RAISE] = 0.65; probs[CALL] = 0.30; probs[FOLD] = 0.05
+            else:
+                probs[CALL] = 0.85; probs[FOLD] = 0.15
+        elif obs.equity > 0.40:
+            probs[CALL] = 0.65; probs[RAISE] = 0.20 if RAISE in legal else 0.0; probs[FOLD] = 0.15
+            if RAISE not in legal:
+                probs = [0.20, 0.80, 0.0]
+        elif obs.equity > 0.25:
+            probs[FOLD] = 0.40; probs[CALL] = 0.50; probs[RAISE] = 0.10 if RAISE in legal else 0.0
+            if RAISE not in legal:
+                probs = [0.45, 0.55, 0.0]
+        else:
+            probs[FOLD] = 0.75; probs[CALL] = 0.20; probs[RAISE] = 0.05 if RAISE in legal else 0.0
+            if RAISE not in legal:
+                probs = [0.80, 0.20, 0.0]
+        # Normalize over legal actions
+        total = sum(probs[a] for a in legal)
+        if total > 0:
+            for a in range(3):
+                if a in legal:
+                    probs[a] /= total
+                else:
+                    probs[a] = 0.0
+        return probs
+
     def _heuristic_act(self, obs: Observation) -> int:
         """Equity-based heuristic strategy (fallback when no CFR policy)"""
         legal = obs.legal_actions

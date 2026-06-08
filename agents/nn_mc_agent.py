@@ -113,7 +113,7 @@ class NN_MCAgent(BaseAgent):
     LABEL_TO_STR_3 = {0: "weak", 1: "mid", 2: "strong"}
     OPP_STRENGTH_LABELS_5 = {"very_weak": 0, "weak": 1, "mid": 2, "strong": 3, "very_strong": 4}
     LABEL_TO_STR_5 = {0: "very_weak", 1: "weak", 2: "mid", 3: "strong", 4: "very_strong"}
-    BNN_FEATURE_DIM = 47  # enriched feature vector dimension
+    BNN_FEATURE_DIM = 53  # enriched feature vector dimension (upgraded from 47)
 
     # State encoding modes:
     #   'prob3': full 3-class probability bins (3×3×3=27 BNN states) → 4860 total
@@ -321,7 +321,7 @@ class NN_MCAgent(BaseAgent):
                              opp_rank_avg: float = None,
                              opp_suited: float = None) -> np.ndarray:
         """
-        Build the 47-dim BNN input feature vector.
+        Build the 53-dim BNN input feature vector (upgraded from 47-dim).
 
         Features [0:44]  — always available (public info):
           [0]    own_equity              : float [0,1]
@@ -340,6 +340,14 @@ class NN_MCAgent(BaseAgent):
           [44]   opp_equity   : [0,1] or 0.5
           [45]   opp_rank_avg : [0,1] or 0.5
           [46]   opp_suited   : {0,1} or 0.5
+
+        Features [47:53] — NEW enhanced features (always available):
+          [47]   betting_level_norm      : float [0,1] = betting_level / 6
+          [48]   position                : {0,1}
+          [49]   raises_remaining_norm   : float [0,1] = raises_remaining / 5
+          [50]   is_in_position          : binary {0,1}
+          [51]   eff_stack_norm          : float [0,1] = eff_stack / 2000
+          [52]   num_legal_actions_norm  : float [0,1] = len(legal_actions) / 3
 
         Training: 50% random mask on opponent features.
         Inference: ALWAYS masked (opponent hand unknown).
@@ -409,6 +417,32 @@ class NN_MCAgent(BaseAgent):
         features[44] = 0.5 if opp_equity is None else opp_equity
         features[45] = 0.5 if opp_rank_avg is None else opp_rank_avg
         features[46] = 0.5 if opp_suited is None else opp_suited
+
+        # --- NEW: Enhanced features [47:53] ---
+        # Betting level (normalized)
+        features[47] = obs.betting_level / 6.0
+
+        # Position
+        features[48] = float(obs.position)
+
+        # Raises remaining (normalized)
+        from game.constants import MAX_RAISES
+        raises_remaining = max(0, MAX_RAISES - obs.raises_this_round)
+        features[49] = raises_remaining / 5.0
+
+        # Is in position (acting last in this betting round)
+        # In heads-up: dealer acts first preflop, second post-flop
+        if obs.current_round == 0:  # PREFLOP
+            is_ip = (obs.position != obs.dealer_pos)
+        else:
+            is_ip = (obs.position == obs.dealer_pos)
+        features[50] = 1.0 if is_ip else 0.0
+
+        # Effective stack depth (normalized)
+        features[51] = min(eff_stack / 2000.0, 1.0)
+
+        # Number of legal actions (normalized)
+        features[52] = len(obs.legal_actions) / 3.0
 
         return features
 
@@ -1105,38 +1139,76 @@ def train_bnn(model: BNNWithMCDropout, X: np.ndarray, y: np.ndarray,
 
 
 # =========================================================================
-#  BNN Policy Network — End-to-End Q-Value Prediction
+#  BNN Policy Network — End-to-End Policy with LayerNorm + Residual
 # =========================================================================
+
+class ResidualBlock(nn.Module):
+    """Residual MLP block with LayerNorm and Dropout."""
+
+    def __init__(self, in_dim: int, out_dim: int, dropout_rate: float = 0.1):
+        super().__init__()
+        self.linear1 = nn.Linear(in_dim, out_dim)
+        self.ln1 = nn.LayerNorm(out_dim)
+        self.linear2 = nn.Linear(out_dim, out_dim)
+        self.ln2 = nn.LayerNorm(out_dim)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.act = nn.ReLU()
+        self.proj = nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
+
+    def forward(self, x):
+        residual = self.proj(x)
+        out = self.act(self.ln1(self.linear1(x)))
+        out = self.dropout(out)
+        out = self.ln2(self.linear2(out))
+        return self.act(out + residual)
+
 
 class BNN_PolicyNet(nn.Module):
     """
-    BNN-style policy network: 47-dim features → action logits [FOLD, CALL, RAISE].
+    BNN-style policy network: 53-dim features → action logits [FOLD, CALL, RAISE].
 
-    Same architecture as BNNWithMCDropout, outputs 3-dim action logits.
-    Trained via behavioral cloning (CrossEntropy) from SARSA's greedy actions.
+    V2 supports LayerNorm + residual connections for better training.
+    Default: (256, 128, 64) with residual blocks.
 
     MC Dropout enables uncertainty estimation at inference time.
 
     Training regime:
-      - Supervised (SARSA distillation): CrossEntropy loss on SARSA's greedy action
-      - Phase 2: fixed pretrained policy + ε-greedy exploration
+      - Phase 1: Behavioral cloning from SARSA/CFR (supervised, CE loss)
+      - Phase 2: DAgger — online policy distillation with SARSA oracle
+      - Phase 3: Online RL (PPO/REINFORCE) + EWC anti-forgetting
       - During training: 50% opponent feature masking (simulates inference)
       - During inference: opponent features ALWAYS masked
     """
 
-    def __init__(self, input_dim=47, hidden_dims=(128, 64, 32),
-                 dropout_rate=0.15):
+    def __init__(self, input_dim=53, hidden_dims=(256, 128, 64),
+                 dropout_rate=0.15, use_residual=True, use_layernorm=True):
         super().__init__()
-        layers = []
-        prev_dim = input_dim
-        for h_dim in hidden_dims:
-            layers.append(nn.Linear(prev_dim, h_dim))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout_rate))
-            prev_dim = h_dim
-        layers.append(nn.Linear(prev_dim, 3))  # action logits: FOLD/CALL/RAISE
-        self.net = nn.Sequential(*layers)
+        self.input_dim = input_dim
+        self.hidden_dims = hidden_dims
         self.dropout_rate = dropout_rate
+        self.use_residual = use_residual
+        self.use_layernorm = use_layernorm
+
+        if use_residual:
+            layers = []
+            prev_dim = input_dim
+            for h_dim in hidden_dims:
+                layers.append(ResidualBlock(prev_dim, h_dim, dropout_rate))
+                prev_dim = h_dim
+            layers.append(nn.Linear(prev_dim, 3))
+            self.net = nn.Sequential(*layers)
+        else:
+            layers = []
+            prev_dim = input_dim
+            for h_dim in hidden_dims:
+                layers.append(nn.Linear(prev_dim, h_dim))
+                if use_layernorm:
+                    layers.append(nn.LayerNorm(h_dim))
+                layers.append(nn.ReLU())
+                layers.append(nn.Dropout(dropout_rate))
+                prev_dim = h_dim
+            layers.append(nn.Linear(prev_dim, 3))
+            self.net = nn.Sequential(*layers)
 
     def forward(self, x):
         """Return raw action logits (no softmax)."""
@@ -1164,6 +1236,16 @@ class BNN_PolicyNet(nn.Module):
         uncertainty = all_probs[:, batch_idx, greedy_actions].std(axis=0)
         return mean_probs, uncertainty
 
+    def get_arch_config(self) -> dict:
+        """Return architecture config for checkpoint serialization."""
+        return {
+            "input_dim": self.input_dim,
+            "hidden_dims": self.hidden_dims,
+            "dropout_rate": self.dropout_rate,
+            "use_residual": self.use_residual,
+            "use_layernorm": self.use_layernorm,
+        }
+
 
 # =========================================================================
 #  BNN Policy Agent — End-to-End Neural Policy
@@ -1171,22 +1253,22 @@ class BNN_PolicyNet(nn.Module):
 
 class BNN_PolicyAgent(BaseAgent):
     """
-    End-to-end neural policy agent trained via SARSA behavioral cloning.
+    End-to-end neural policy agent with DAgger + Online RL + EWC support.
 
     Maps 47-dim features → action logits [FOLD, CALL, RAISE].
-    Trained via CrossEntropy on SARSA's greedy actions with 50%
-    opponent feature masking during training.
 
-    Architecture:
+    Training pipeline:
       1. Phase 1: Behavioral cloning from SARSA (supervised, CE loss)
-      2. Phase 2: Fixed pretrained policy + ε-greedy exploration
+      2. Phase 2: DAgger — online policy distillation with SARSA oracle
+      3. Phase 3: Online RL (REINFORCE/PPO) + EWC anti-forgetting
+      4. Phase 4: Self-play against historical policy snapshots
 
     This avoids the Q-value regression stability issues while
     preserving the rich feature representation.
     """
 
     ACTION_SPACE = [0, 1, 2]
-    FEATURE_DIM = 47
+    FEATURE_DIM = 53
 
     def __init__(self, name: str = "BNN_PolicyAgent",
                  epsilon: float = 1.0,
@@ -1196,8 +1278,10 @@ class BNN_PolicyAgent(BaseAgent):
                  device: str = "cpu",
                  player_id: int = 0,
                  load_model_path: str = None,
-                 hidden_dims: tuple = (128, 64, 32),
-                 dropout_rate: float = 0.15):
+                 hidden_dims: tuple = (256, 128, 64),
+                 dropout_rate: float = 0.15,
+                 use_residual: bool = True,
+                 use_layernorm: bool = True):
         super().__init__(name=name)
         self.epsilon = epsilon
         self.epsilon_decay = epsilon_decay
@@ -1205,12 +1289,18 @@ class BNN_PolicyAgent(BaseAgent):
         self.mc_samples = mc_samples
         self.device = device
         self.player_id = player_id
+        self._hidden_dims = hidden_dims
+        self._dropout_rate = dropout_rate
+        self._use_residual = use_residual
+        self._use_layernorm = use_layernorm
 
         # --- Policy network ---
         self.policy_net = BNN_PolicyNet(
             input_dim=self.FEATURE_DIM,
             hidden_dims=hidden_dims,
             dropout_rate=dropout_rate,
+            use_residual=use_residual,
+            use_layernorm=use_layernorm,
         ).to(self.device)
 
         # --- Per-hand tracking ---
@@ -1218,12 +1308,13 @@ class BNN_PolicyAgent(BaseAgent):
         self._feat_builder._auto_record_self = False
         self._prev_community_count = 0
 
+        # --- EWC ---
+        self._ewc_fisher = {}     # param_name -> fisher diagonal
+        self._ewc_params = {}     # param_name -> frozen param values
+        self._ewc_lambda = 0.0
+
         if load_model_path:
             self.load_model(load_model_path)
-
-    # ==================================================================
-    #  Public interface (BaseAgent)
-    # ==================================================================
 
     def act(self, obs: Observation) -> int:
         cc_count = len(obs.community_cards)
@@ -1243,7 +1334,6 @@ class BNN_PolicyAgent(BaseAgent):
         if random.random() < self.epsilon:
             action = random.choice(legal)
         else:
-            # Mask illegal actions, pick argmax
             masked_probs = np.array([probs[a] if a in legal else -1.0 for a in range(3)])
             action = int(masked_probs.argmax())
 
@@ -1280,13 +1370,19 @@ class BNN_PolicyAgent(BaseAgent):
         if len(self.dagger_buffer) > self.dagger_capacity:
             self.dagger_buffer.pop(0)
 
-    def train_dagger(self, epochs: int = 10, batch_size: int = 128):
+    def clear_dagger_buffer(self):
+        """Clear DAgger buffer for a fresh round."""
+        self.dagger_buffer = []
+
+    def train_dagger(self, epochs: int = 10, batch_size: int = 128,
+                     ewc_lambda: float = 0.0):
         """
         Fine-tune policy network on DAgger buffer via CrossEntropy.
 
         Args:
             epochs: number of training epochs
             batch_size: mini-batch size
+            ewc_lambda: EWC regularization strength (0 = disabled)
 
         Returns:
             avg_loss, accuracy on dagger buffer
@@ -1311,21 +1407,193 @@ class BNN_PolicyAgent(BaseAgent):
 
         total_loss = 0.0
         total_correct = 0
+        total_samples = 0
         self.policy_net.train()
         for _ in range(epochs):
             for batch_x, batch_y in loader:
                 self.dagger_optimizer.zero_grad()
                 logits = self.policy_net(batch_x)
                 loss = criterion(logits, batch_y)
+
+                # EWC regularization
+                if ewc_lambda > 0 and self._ewc_fisher:
+                    ewc_loss = self._compute_ewc_loss()
+                    loss = loss + ewc_lambda * ewc_loss
+
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=5.0)
                 self.dagger_optimizer.step()
                 total_loss += loss.item() * batch_x.size(0)
                 total_correct += (logits.argmax(dim=1) == batch_y).sum().item()
+                total_samples += batch_x.size(0)
 
-        avg_loss = total_loss / (len(X_d) * epochs) if len(X_d) > 0 else 0.0
-        acc = total_correct / (len(X_d) * epochs) if len(X_d) > 0 else 0.0
+        avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
+        acc = total_correct / total_samples if total_samples > 0 else 0.0
         return avg_loss, acc
+
+    # ==================================================================
+    #  EWC — Elastic Weight Consolidation (anti-catastrophic forgetting)
+    # ==================================================================
+
+    def init_ewc(self, dataloader, ewc_lambda: float = 100.0, n_samples: int = 500):
+        """
+        Compute Fisher diagonal on reference data and freeze params.
+
+        Call BEFORE fine-tuning on new data.
+
+        Args:
+            dataloader: DataLoader over reference (BC) data
+            ewc_lambda: EWC regularization strength
+            n_samples: max samples for Fisher estimation
+        """
+        self._ewc_lambda = ewc_lambda
+        self._ewc_fisher = {}
+        self._ewc_params = {}
+
+        # Store frozen params
+        for name, param in self.policy_net.named_parameters():
+            self._ewc_params[name] = param.data.clone()
+
+        # Compute Fisher diagonal (expectation of squared gradients)
+        self.policy_net.train()
+        criterion = nn.CrossEntropyLoss()
+        sample_count = 0
+
+        for batch_x, batch_y in dataloader:
+            if sample_count >= n_samples:
+                break
+            self.policy_net.zero_grad()
+            logits = self.policy_net(batch_x.to(self.device))
+            loss = criterion(logits, batch_y.to(self.device))
+            loss.backward()
+
+            for name, param in self.policy_net.named_parameters():
+                if param.grad is not None:
+                    if name not in self._ewc_fisher:
+                        self._ewc_fisher[name] = param.grad.data.clone() ** 2
+                    else:
+                        self._ewc_fisher[name] += param.grad.data.clone() ** 2
+            sample_count += batch_x.size(0)
+
+        # Average
+        for name in self._ewc_fisher:
+            self._ewc_fisher[name] /= max(sample_count, 1)
+
+        print(f"[EWC] Fisher computed on {sample_count} samples, "
+              f"lambda={ewc_lambda}")
+
+    def _compute_ewc_loss(self) -> torch.Tensor:
+        """Compute EWC penalty: Σ F_i * (θ_i - θ*_i)²."""
+        ewc_loss = torch.tensor(0.0, device=self.device)
+        for name, param in self.policy_net.named_parameters():
+            if name in self._ewc_fisher and name in self._ewc_params:
+                fisher = self._ewc_fisher[name].to(self.device)
+                frozen = self._ewc_params[name].to(self.device)
+                ewc_loss += (fisher * (param - frozen) ** 2).sum()
+        return ewc_loss
+
+    # ==================================================================
+    #  Online RL — REINFORCE with baseline
+    # ==================================================================
+
+    def init_rl_optimizer(self, lr: float = 3e-5):
+        """Initialize optimizer for online RL fine-tuning."""
+        self.rl_optimizer = torch.optim.AdamW(
+            self.policy_net.parameters(), lr=lr, weight_decay=1e-5)
+        self.rl_trajectory: list[dict] = []
+        self.rl_baseline = 0.0
+        self.rl_baseline_alpha = 0.05
+
+    def record_rl_step(self, features: np.ndarray, action: int,
+                        log_prob: float, reward: float):
+        """Record one RL step for trajectory-based REINFORCE."""
+        self.rl_trajectory.append({
+            "features": features.copy(),
+            "action": action,
+            "log_prob": log_prob,
+            "reward": reward,
+        })
+
+    def train_rl_step(self, ewc_lambda: float = 0.0):
+        """
+        REINFORCE update on accumulated trajectory.
+
+        Returns:
+            avg_loss, num_steps
+        """
+        if len(self.rl_trajectory) == 0:
+            return 0.0, 0
+
+        total_return = sum(s["reward"] for s in self.rl_trajectory)
+        self.rl_baseline = (self.rl_baseline_alpha * total_return +
+                            (1 - self.rl_baseline_alpha) * self.rl_baseline)
+        advantage = total_return - self.rl_baseline
+
+        total_loss = 0.0
+        n_steps = len(self.rl_trajectory)
+
+        self.policy_net.train()
+        for step_record in self.rl_trajectory:
+            x = torch.tensor(step_record["features"], dtype=torch.float32).unsqueeze(0).to(self.device)
+            a = torch.tensor([step_record["action"]], dtype=torch.long).to(self.device)
+
+            logits = self.policy_net(x)
+            log_probs = F.log_softmax(logits, dim=-1)
+            selected_log_prob = log_probs[0, a[0]]
+
+            # REINFORCE: loss = -log_prob * advantage
+            pg_loss = -selected_log_prob * advantage
+
+            # EWC regularization
+            if ewc_lambda > 0 and self._ewc_fisher:
+                ewc_loss = self._compute_ewc_loss()
+                pg_loss = pg_loss + ewc_lambda * ewc_loss
+
+            self.rl_optimizer.zero_grad()
+            pg_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
+            self.rl_optimizer.step()
+            total_loss += pg_loss.item()
+
+        self.rl_trajectory = []
+        avg_loss = total_loss / n_steps
+        return avg_loss, n_steps
+
+    # ==================================================================
+    #  Action with log-prob (for RL)
+    # ==================================================================
+
+    def act_with_logprob(self, obs: Observation) -> tuple[int, float]:
+        """Return (action, log_prob) for REINFORCE training."""
+        cc_count = len(obs.community_cards)
+        if cc_count < self._prev_community_count:
+            self.reset()
+        self._prev_community_count = cc_count
+
+        features = self._feat_builder._encode_bnn_features(obs)
+        x = torch.tensor(features, dtype=torch.float32).unsqueeze(0).to(self.device)
+
+        self.policy_net.eval()
+        with torch.no_grad():
+            logits = self.policy_net(x)
+            probs = F.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
+
+        legal = obs.legal_actions
+        if random.random() < self.epsilon:
+            action = random.choice(legal)
+            # Approximate log_prob for random action
+            log_prob = np.log(1.0 / len(legal))
+        else:
+            masked_probs = np.array([probs[a] if a in legal else 0.0 for a in range(3)])
+            total = masked_probs.sum()
+            if total > 1e-12:
+                masked_probs = masked_probs / total
+            else:
+                masked_probs = np.array([1.0 / len(legal) if a in legal else 0.0 for a in range(3)])
+            action = int(np.random.choice(3, p=masked_probs))
+            log_prob = np.log(max(masked_probs[action], 1e-8))
+
+        return action, log_prob
 
     # ==================================================================
     #  Persistence
@@ -1336,18 +1604,255 @@ class BNN_PolicyAgent(BaseAgent):
         os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
         torch.save({
             "policy_net_state_dict": self.policy_net.state_dict(),
+            "arch_config": self.policy_net.get_arch_config(),
             "epsilon": self.epsilon,
         }, filepath)
         print(f"[BNN_PolicyAgent] Model saved to {filepath}")
 
     def load_model(self, filepath: str) -> None:
         checkpoint = torch.load(filepath, map_location=self.device)
+        # Handle old-format checkpoints without arch_config
+        if "arch_config" in checkpoint:
+            arch = checkpoint["arch_config"]
+            # Rebuild network if architecture differs
+            if (arch.get("hidden_dims") != self._hidden_dims or
+                    arch.get("use_residual", False) != self._use_residual):
+                self.policy_net = BNN_PolicyNet(
+                    input_dim=arch.get("input_dim", self.FEATURE_DIM),
+                    hidden_dims=arch.get("hidden_dims", self._hidden_dims),
+                    dropout_rate=arch.get("dropout_rate", self._dropout_rate),
+                    use_residual=arch.get("use_residual", False),
+                    use_layernorm=arch.get("use_layernorm", False),
+                ).to(self.device)
         self.policy_net.load_state_dict(checkpoint["policy_net_state_dict"])
         self.epsilon = checkpoint.get("epsilon", self.epsilon)
         print(f"[BNN_PolicyAgent] Model loaded from {filepath}")
 
 
 # =========================================================================
+#  CFR Expert Knowledge Distillation — Data Collection + KL Training
+# =========================================================================
+
+def collect_expert_policy_data(expert_agent, num_hands: int = 30000,
+                                mask_prob: float = 0.5,
+                                verbose: bool = True) -> tuple:
+    """
+    Collect (features, Expert_soft_probs) pairs for CFR knowledge distillation.
+
+    Plays Expert vs RandomAgent. At each Expert decision point, records:
+      - 53-dim BNN features (with opponent masking)
+      - Expert's mixed strategy probability distribution [P(FOLD), P(CALL), P(RAISE)]
+
+    The soft labels from CFR Nash equilibrium provide richer supervision
+    than SARSA hard labels (e.g., "60% CALL, 35% RAISE, 5% FOLD" vs just "CALL").
+
+    Args:
+        expert_agent: ExpertAgent with loaded CFR policy
+        num_hands: number of hands
+        mask_prob: opponent feature masking probability
+        verbose: print progress
+
+    Returns:
+        X: np.ndarray (N, 53) — feature vectors
+        y_probs: np.ndarray (N, 3) — Expert action probability distributions
+        mask_flags: np.ndarray (N,) — 1 if opponent features were masked
+    """
+    import random as _random
+    from treys import Card
+    from agents.random_agent import RandomAgent
+    from game.engine import GameEngine
+    from game.evaluator import compute_equity
+
+    X_list, y_prob_list, mask_list = [], [], []
+    dummy = NN_MCAgent(name="DataCollector", num_opp_classes=3)
+    dummy._auto_record_self = False
+
+    opponent = RandomAgent(name="Random_Opp")
+    env = GameEngine(expert_agent, opponent)
+
+    for hand in range(num_hands):
+        dummy.reset()
+        obs = env.reset_hand()
+        done = False
+        step_count = 0
+
+        while not done:
+            step_count += 1
+            if step_count > 50:
+                break
+
+            cp = env.current_player
+
+            if cp == 0:  # Expert's turn
+                # Get Expert's mixed strategy as soft label
+                expert_probs = expert_agent.get_action_probs(obs)
+
+                # Build features with optional opponent masking
+                is_masked = _random.random() < mask_prob
+                if not is_masked and len(env.players[1].hole_cards) == 2:
+                    opp_hole = env.players[1].hole_cards
+                    opp_ranks = [Card.get_rank_int(c) for c in opp_hole]
+                    opp_rank_avg = sum(opp_ranks) / (len(opp_ranks) * 12.0)
+                    opp_suited = 1.0 if Card.get_suit_int(opp_hole[0]) == Card.get_suit_int(opp_hole[1]) else 0.0
+                    if len(obs.community_cards) >= 3:
+                        opp_eq = compute_equity(opp_hole, obs.community_cards)
+                    else:
+                        opp_eq = _preflop_opponent_equity(opp_hole)
+                    feat = dummy._encode_bnn_features(
+                        obs, opp_equity=opp_eq, opp_rank_avg=opp_rank_avg,
+                        opp_suited=opp_suited)
+                else:
+                    feat = dummy._encode_bnn_features(obs)
+
+                X_list.append(feat)
+                y_prob_list.append(np.array(expert_probs, dtype=np.float32))
+                mask_list.append(int(is_masked))
+
+                # Expert acts (sample from probs)
+                action = expert_agent.act(obs)
+                round_before = obs.current_round
+                obs, reward, done, info = env.step(action)
+                dummy.record_action(cp, action, round_before)
+            else:  # Opponent's turn
+                round_before = obs.current_round
+                opp_action = env.agents[cp].act(obs)
+                obs, reward, done, info = env.step(opp_action)
+                dummy.record_action(cp, opp_action, round_before)
+
+        if verbose and (hand + 1) % 1000 == 0:
+            print(f"  ExpertDistill: {len(X_list)} samples after {hand + 1} hands")
+
+    X = np.array(X_list, dtype=np.float32)
+    y_probs = np.array(y_prob_list, dtype=np.float32)
+    mask_flags = np.array(mask_list, dtype=np.int64)
+
+    if verbose:
+        print(f"\n  Collected {len(X)} samples in total")
+        for i, name in enumerate(["FOLD", "CALL", "RAISE"]):
+            avg_prob = y_probs[:, i].mean()
+            print(f"    {name}: avg_prob={avg_prob:.3f}")
+    return X, y_probs, mask_flags
+
+
+def train_bnn_policy_kl(model: BNN_PolicyNet, X: np.ndarray,
+                         y_probs: np.ndarray,
+                         mask_flags: np.ndarray = None,
+                         epochs: int = 150, batch_size: int = 64,
+                         lr: float = 5e-4, alpha: float = 0.3,
+                         temperature: float = 3.0,
+                         val_split: float = 0.15,
+                         device: str = "cpu", verbose: bool = True):
+    """
+    Train BNN_PolicyNet via knowledge distillation from Expert soft labels.
+
+    Combined loss:
+        L = alpha * CE(student, hard_argmax) + (1-alpha) * T**2 * KL(Expert_soft/T || Student_soft/T)
+
+    The soft targets provide richer supervision than hard labels:
+      - Mixed strategy (e.g., 55% CALL + 40% RAISE) encodes strategic nuance
+      - Higher temperature softens the distribution, exposing the action ranking
+
+    Args:
+        model: BNN_PolicyNet instance
+        X: features (N, 53)
+        y_probs: Expert action probabilities (N, 3)
+        alpha: weight of hard CE loss (0 = all KL, 1 = all CE)
+        temperature: softmax temperature for distillation
+
+    Returns:
+        trained model
+    """
+    # Convert soft probs to hard labels for CE
+    y_hard = y_probs.argmax(axis=1).astype(np.int64)
+
+    n = len(X)
+    n_val = int(n * val_split)
+    indices = np.random.RandomState(42).permutation(n)
+    train_idx, val_idx = indices[n_val:], indices[:n_val]
+
+    X_train = torch.tensor(X[train_idx], dtype=torch.float32).to(device)
+    y_train_hard = torch.tensor(y_hard[train_idx], dtype=torch.long).to(device)
+    y_train_soft = torch.tensor(y_probs[train_idx], dtype=torch.float32).to(device)
+    dataset = torch.utils.data.TensorDataset(X_train, y_train_hard, y_train_soft)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    X_val, y_val = None, None
+    if n_val > 0:
+        X_val = torch.tensor(X[val_idx], dtype=torch.float32).to(device)
+        y_val = torch.tensor(y_hard[val_idx], dtype=torch.long).to(device)
+
+    # Class-balanced weights for hard CE
+    class_counts = np.bincount(y_hard[train_idx], minlength=3)
+    class_weights = 1.0 / (class_counts + 1e-6)
+    class_weights = class_weights / class_weights.sum() * 3
+    class_weights_t = torch.tensor(class_weights, dtype=torch.float32).to(device)
+
+    ce_criterion = nn.CrossEntropyLoss(weight=class_weights_t)
+    kl_criterion = nn.KLDivLoss(reduction="batchmean")
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=30, min_lr=1e-6, verbose=False)
+
+    best_val_loss = float('inf')
+    best_val_acc = 0.0
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0.0
+        total_correct = 0
+
+        for batch_x, batch_y_hard, batch_y_soft in loader:
+            optimizer.zero_grad()
+            student_logits = model(batch_x)
+
+            # Hard label CE loss
+            ce_loss = ce_criterion(student_logits, batch_y_hard)
+
+            # Soft distillation loss (KL divergence)
+            student_log_soft = F.log_softmax(student_logits / temperature, dim=-1)
+            teacher_soft = (batch_y_soft + 1e-8) / (batch_y_soft + 1e-8).sum(dim=-1, keepdim=True)
+            kl_loss = kl_criterion(student_log_soft, teacher_soft) * (temperature ** 2)
+
+            loss = alpha * ce_loss + (1 - alpha) * kl_loss
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
+
+            total_loss += loss.item() * batch_x.size(0)
+            total_correct += (student_logits.argmax(dim=1) == batch_y_hard).sum().item()
+
+        avg_loss = total_loss / len(train_idx)
+        train_acc = total_correct / len(train_idx)
+
+        val_loss = float('inf')
+        val_acc = 0.0
+        if X_val is not None:
+            model.eval()
+            with torch.no_grad():
+                val_logits = model(X_val)
+                val_loss = ce_criterion(val_logits, y_val).item()
+                val_acc = (val_logits.argmax(dim=1) == y_val).float().mean().item()
+            model.train()
+            scheduler.step(val_loss)
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+
+        if verbose and (epoch + 1) % 20 == 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"  DistillKL Epoch {epoch + 1:>3}/{epochs} | Loss: {avg_loss:.4f} | "
+                  f"TrainAcc: {train_acc:.3f} | ValLoss: {val_loss:.4f} | "
+                  f"ValAcc: {val_acc:.3f} | BestValAcc: {best_val_acc:.3f} | LR: {current_lr:.2e}")
+
+    if verbose:
+        print(f"  DistillKL Final ValAcc: {val_acc:.3f}  Best: {best_val_acc:.3f}")
+
+    return model
+
+
 #  SARSA Behavioral Cloning — Data Collection
 # =========================================================================
 
@@ -1537,3 +2042,137 @@ def train_bnn_policy_distill(model: BNN_PolicyNet, X: np.ndarray, y: np.ndarray,
         print(f"  Final ValAcc: {val_acc:.3f}  Best: {best_val_acc:.3f}")
 
     return model
+
+
+# =========================================================================
+#  Knowledge Distillation: V1 Teacher → V2 Student (transfer learning)
+# =========================================================================
+
+def distill_teacher_to_student(
+    teacher_model: BNN_PolicyNet,
+    student_model: BNN_PolicyNet,
+    X: np.ndarray,
+    y: np.ndarray,
+    mask_flags: np.ndarray = None,
+    epochs: int = 100,
+    batch_size: int = 64,
+    lr: float = 3e-4,
+    alpha: float = 0.5,
+    temperature: float = 3.0,
+    val_split: float = 0.15,
+    device: str = "cpu",
+    verbose: bool = True,
+):
+    """
+    Knowledge distillation: transfer V1 teacher's soft knowledge to V2 student.
+
+    Combined loss:
+        L = α * CE(student_logits, hard_labels)
+          + (1-α) * T² * KL(softmax(teacher/T) || softmax(student/T))
+
+    The soft targets from the teacher provide richer supervision signal
+    (e.g., "CALL is best, RAISE is close second, FOLD is terrible")
+    than hard one-hot labels.
+
+    Args:
+        teacher_model: trained V1 (or any) model for soft labels
+        student_model: untrained V2 model to learn
+        X, y: BC data (features, hard labels from SARSA)
+        alpha: weight of hard label CE loss (0=all soft, 1=all hard)
+        temperature: softmax temperature (higher = softer distribution)
+
+    Returns:
+        trained student_model
+    """
+    teacher_model.eval()
+    teacher_model.to(device)
+
+    n = len(X)
+    n_val = int(n * val_split)
+    indices = np.random.RandomState(42).permutation(n)
+    train_idx, val_idx = indices[n_val:], indices[:n_val]
+
+    X_train_t = torch.tensor(X[train_idx], dtype=torch.float32).to(device)
+    y_train = torch.tensor(y[train_idx], dtype=torch.long).to(device)
+
+    # Pre-compute teacher soft labels
+    with torch.no_grad():
+        teacher_logits = teacher_model(X_train_t)
+        teacher_soft = F.softmax(teacher_logits / temperature, dim=-1)
+
+    dataset = torch.utils.data.TensorDataset(X_train_t, y_train, teacher_soft)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    X_val_t, y_val_t = None, None
+    if n_val > 0:
+        X_val_t = torch.tensor(X[val_idx], dtype=torch.float32).to(device)
+        y_val_t = torch.tensor(y[val_idx], dtype=torch.long).to(device)
+
+    # Class-balanced weights for hard CE
+    class_counts = np.bincount(y[train_idx], minlength=3)
+    class_weights = 1.0 / (class_counts + 1e-6)
+    class_weights = class_weights / class_weights.sum() * 3
+    class_weights_t = torch.tensor(class_weights, dtype=torch.float32).to(device)
+
+    ce_criterion = nn.CrossEntropyLoss(weight=class_weights_t)
+    kl_criterion = nn.KLDivLoss(reduction="batchmean")
+
+    optimizer = torch.optim.AdamW(student_model.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=25, min_lr=1e-6, verbose=False)
+
+    best_val_loss = float('inf')
+    best_val_acc = 0.0
+
+    for epoch in range(epochs):
+        student_model.train()
+        total_loss = 0.0
+        total_correct = 0
+
+        for batch_x, batch_y, batch_teacher_soft in loader:
+            optimizer.zero_grad()
+            student_logits = student_model(batch_x)
+
+            # Hard label CE loss
+            ce_loss = ce_criterion(student_logits, batch_y)
+
+            # Soft distillation loss (KL divergence)
+            student_log_soft = F.log_softmax(student_logits / temperature, dim=-1)
+            kl_loss = kl_criterion(student_log_soft, batch_teacher_soft) * (temperature ** 2)
+
+            loss = alpha * ce_loss + (1 - alpha) * kl_loss
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(student_model.parameters(), max_norm=5.0)
+            optimizer.step()
+
+            total_loss += loss.item() * batch_x.size(0)
+            total_correct += (student_logits.argmax(dim=1) == batch_y).sum().item()
+
+        avg_loss = total_loss / len(train_idx)
+        train_acc = total_correct / len(train_idx)
+
+        val_loss = float('inf')
+        val_acc = 0.0
+        if X_val_t is not None:
+            student_model.eval()
+            with torch.no_grad():
+                val_logits = student_model(X_val_t)
+                val_loss = ce_criterion(val_logits, y_val_t).item()
+                val_acc = (val_logits.argmax(dim=1) == y_val_t).float().mean().item()
+            scheduler.step(val_loss)
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+
+        if verbose and (epoch + 1) % 20 == 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"  Distill Epoch {epoch + 1:>3}/{epochs} | Loss: {avg_loss:.4f} | "
+                  f"TrainAcc: {train_acc:.3f} | ValLoss: {val_loss:.4f} | "
+                  f"ValAcc: {val_acc:.3f} | BestValAcc: {best_val_acc:.3f} | LR: {current_lr:.2e}")
+
+    if verbose:
+        print(f"  Distill Final ValAcc: {val_acc:.3f}  Best: {best_val_acc:.3f}")
+
+    return student_model
