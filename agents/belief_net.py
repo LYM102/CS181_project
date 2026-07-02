@@ -1,4 +1,4 @@
-# agents/belief_net.py — MC-Dropout BNN + training utilities
+"""MC-Dropout BNN for opponent hand-strength prediction."""
 
 from __future__ import annotations
 

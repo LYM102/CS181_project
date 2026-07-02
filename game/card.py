@@ -1,4 +1,4 @@
-# game/card.py - Poker cards and deck (based on treys library, standard 52 cards)
+"""Deck and card utilities (treys-based, 52-card)."""
 
 from __future__ import annotations
 import random
@@ -7,7 +7,7 @@ from game.constants import SUITS, RANKS, DECK_SIZE
 
 
 class Deck:
-    """Standard 52-card deck: 4 suits (s/h/d/c) x 13 ranks (2~A)"""
+    """Standard 52-card deck."""
 
     def __init__(self):
         self.cards: list[int] = []

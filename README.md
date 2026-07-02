@@ -1,15 +1,17 @@
-# Belief-Gated Policies in Abstracted Texas Hold'em
+# From SARSA to Belief-Gated Agents for Abstracted Heads-Up Texas Hold'em
 
-A research codebase for *Belief-Gated Policies in Abstracted Texas Hold'em* — a four-stage agent ladder that progressively incorporates opponent modeling into decision-making: tabular SARSA → belief-augmented SARSA → residual belief-gated SARSA → neural policy transfer.
+A four-stage agent ladder that progressively incorporates opponent modeling into decision-making: tabular SARSA → belief-augmented SARSA → residual belief-gated SARSA → neural policy transfer.
 
 We use a standard 52-card deck, treys-based hand strength, fixed betting levels, and per-hand stack reset for evaluation.
+
+**Paper:** [From SARSA to Belief-Gated Agents for Abstracted Heads-Up Texas Hold'em](https://github.com/LYM102/CS181_project)
 
 ---
 
 ## Agent Ladder
 
 | Stage | Class | Policy | Opponent Modeling |
-|-------|--------|--------|-------------------|
+|-------|-------|--------|-------------------|
 | **L0** | `SarsaAgent` | Tabular Q (SARSA) | None |
 | **L1** | `L1Agent` | Same Q-table | BNN belief → state augmentation (τ = 0.65) |
 | **L2** | `L2Agent` | Same Q-table as L1 | BNN + learned residual action gate |
@@ -38,7 +40,7 @@ We use a standard 52-card deck, treys-based hand strength, fixed betting levels,
 ```
 CS181_project/
 ├── main.py                     # Interactive / evaluate / step modes
-├── eval_progressive.py         # Main ladder eval (L0–L3 vs Random/Aggressive/CFR)
+├── eval_progressive.py         # Ladder eval (L0–L3 vs Random/Aggressive/CFR)
 ├── retrain_and_eval.py         # Full retrain pipeline
 ├── requirements.txt
 │
@@ -46,30 +48,29 @@ CS181_project/
 │   ├── engine.py               # Game engine + Observation
 │   ├── match_eval.py           # Per-hand stack reset, AvgR / win rate
 │   ├── evaluator.py            # treys hand strength φ, bins
+│   ├── card.py                 # Deck and card utilities
+│   ├── constants.py            # Game constants
 │   └── cfr_solver.py           # External-sampling MCCFR
 │
 ├── agents/
+│   ├── base_agent.py           # Abstract base class
 │   ├── sarsa_agent.py          # L0: tabular SARSA
-│   ├── l1_agent.py             # L1: belief-augmented SARSA
-│   ├── l2_agent.py             # L2: + residual action gate
-│   ├── l3_agent.py             # L3: neural policy + gate
 │   ├── belief_features.py      # 53-dim feature encoder (shared)
 │   ├── belief_net.py           # MC-Dropout BNN + training helpers
 │   ├── belief_sarsa_agent.py   # Tabular Q + BNN base class
 │   ├── belief_gating.py        # Learnable residual gate g_θ
+│   ├── l1_agent.py             # L1: belief-augmented SARSA
+│   ├── l2_agent.py             # L2: + residual action gate
+│   ├── l3_agent.py             # L3: neural policy + gate
 │   ├── expert_agent.py         # CFR equilibrium opponent
 │   ├── aggressive_agent.py     # Exploitative eval opponent
 │   └── random_agent.py         # Random baseline
 │
-├── train/
-│   ├── train_belief_net.py     # BNN opponent-strength classifier
-│   ├── train_expert_distill.py # L3 neural policy (CFR distillation)
-│   ├── train_gating_net.py     # Gate g_θ (L2 or L3 logits)
-│   └── train_nn_mc_l1.py       # L1 gated-state SARSA Q-table
-│
-└── scripts/
-    ├── collect_viz_data.py     # Collect per-decision-point data
-    └── viz_experiments.py      # Generate paper figures
+└── train/
+    ├── train_belief_net.py     # BNN opponent-strength classifier
+    ├── train_expert_distill.py # L3 neural policy (CFR distillation)
+    ├── train_gating_net.py     # Gate g_θ (L2 or L3 logits)
+    └── train_nn_mc_l1.py       # L1 gated-state SARSA Q-table
 ```
 
 ---
@@ -120,7 +121,7 @@ Or one shot: `python retrain_and_eval.py --clean --train-belief --train-distill 
 ### Evaluate
 
 ```bash
-python eval_progressive.py --hands 1000 --seeds 42 43 44
+python eval_progressive.py --hands 1000 --seeds 3
 ```
 
 ### Head-to-head
@@ -146,6 +147,16 @@ python main.py --mode evaluate --agent0 l1 --agent1 aggressive --num_hands 1000
 - **WR** (secondary): fraction of hands won.
 
 All evaluations use per-hand stack reset. Results are averaged over 3 random seeds × 1000 hands.
+
+---
+
+## External Resources
+
+| Resource | Usage |
+|----------|-------|
+| [treys](https://github.com/ihendley/treys) | Poker hand evaluation and card representation |
+| [PyTorch](https://pytorch.org/) | Neural network training (BNN, gating net, L3 policy) |
+| [NumPy](https://numpy.org/) | Numerical computation |
 
 ---
 

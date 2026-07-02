@@ -1,4 +1,4 @@
-# agents/belief_gating.py — residual logit gate g_θ
+"""Residual gating network g_θ for action-level belief intervention."""
 
 from __future__ import annotations
 

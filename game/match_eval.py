@@ -1,13 +1,5 @@
-# game/match_eval.py — Unified match evaluation (WR + zero-sum AvgR)
-"""
-AvgR = mean per-hand chip delta for the reported player.
+"""Match evaluation with per-hand stack reset and zero-sum AvgR."""
 
-Each HandResult.rewards[player] is chips_after_hand - chips_at_hand_start
-(blinds included). Rewards are zero-sum: rewards[0] + rewards[1] == 0.
-
-Evaluation protocol: reset both players to STARTING_CHIPS before every hand
-so each hand is independent (no stack carryover / bankruptcy distortion).
-"""
 
 from __future__ import annotations
 

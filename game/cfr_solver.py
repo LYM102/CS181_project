@@ -1,23 +1,4 @@
-# game/cfr_solver.py - Custom CFR (Counterfactual Regret Minimization) solver
-
-from __future__ import annotations
-#
-# CFR implementation for standard 52-card Texas Hold'em.
-# Uses External Sampling MCCFR + compact information set encoding.
-#
-# External Sampling:
-#   - Opponent actions: sample using current strategy (only one path)
-#   - Current player actions: traverse all actions
-#   - Chance events (dealing): sample
-#   → Greatly reduces the number of nodes traversed per iteration
-#
-# Information set design:
-#   info_key = (player, hole_bucket, community_bucket,
-#               betting_round, betting_level, raises_this_round)
-#   - hole_bucket: treys hand strength via random board completion to 7
-#     cards, discretized into 10 buckets. Uses compute_hand_strength()
-#     for ALL rounds (identical to SARSA's state encoding).
-#   - community_bucket: number of community cards (0/3/4/5)
+"""External-sampling MCCFR solver for abstracted heads-up Texas Hold'em."""
 
 from __future__ import annotations
 import random

@@ -1,4 +1,4 @@
-# agents/belief_features.py
+"""53-dimensional feature encoder for BNN and neural policies."""
 
 from __future__ import annotations
 

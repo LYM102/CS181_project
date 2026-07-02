@@ -1,4 +1,4 @@
-# game/evaluator.py - Hand evaluation and comparison (based on treys library, 52 cards)
+"""Hand strength evaluation and abstraction (treys-based)."""
 
 from __future__ import annotations
 from functools import lru_cache

@@ -1,4 +1,4 @@
-# agents/belief_sarsa_agent.py
+"""Tabular SARSA with BNN belief augmentation (shared base for L1/L2)."""
 
 from __future__ import annotations
 

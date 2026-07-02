@@ -1,4 +1,4 @@
-# agents/base_agent.py
+"""Abstract base class for all agents."""
 
 from abc import ABC, abstractmethod
 from game.engine import Observation

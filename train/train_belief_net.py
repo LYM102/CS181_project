@@ -1,4 +1,3 @@
-# train/train_belief_net.py
 """Train BNN opponent-strength classifier."""
 from __future__ import annotations
 
@@ -33,14 +32,10 @@ def collect_mixed_belief_data(num_hands: int = 50000,
                               mask_prob: float = 1.0,
                               verbose: bool = True,
                               num_classes: int = 3) -> tuple:
-    """
-    Collect opponent-strength labels from games vs Expert and Aggressive.
+    """Collect opponent-strength labels from mixed matchups.
 
-    FIXED: target opponent (Aggressive/Expert) is player 1, observer is player 0.
-    Now: observer is Random (neutral), target is Expert/Aggressive (real opponent).
-
-    v5: treys hand-strength labels (compute_hand_strength), same as SARSA/CFR.
-    mask_prob=1.0: ALWAYS mask opponent features (matching inference conditions).
+    Observer is Random (neutral); target is Expert/Aggressive.
+    mask_prob=1.0 masks opponent features to match inference conditions.
     """
     import agents.belief_net as belief_net
     if num_classes == 5:

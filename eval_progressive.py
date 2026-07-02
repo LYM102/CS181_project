@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Ladder eval: L0–L3 vs Random / Aggressive / CFR."""
 
 import argparse

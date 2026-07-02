@@ -1,4 +1,3 @@
-# train/train_expert_distill.py
 """CFR Expert → L3 policy (KL distillation + optional DAgger)."""
 from __future__ import annotations
 

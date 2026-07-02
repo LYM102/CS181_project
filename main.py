@@ -1,6 +1,4 @@
-# main.py
-
-
+"""Interactive / evaluate / step-by-step modes for heads-up Texas Hold'em."""
 
 import argparse
 from collections import defaultdict
@@ -23,7 +21,6 @@ AGENT_REGISTRY = {
     "l1": L1Agent,
     "l2": L2Agent,
     "l3": L3Agent,
-    "nn_mc": L1Agent,
 }
 
 
@@ -35,7 +32,7 @@ def create_agent(agent_type: str, player_id: int, model_path: str = None):
     cls = AGENT_REGISTRY[agent_type]
     if agent_type == "sarsa" and model_path:
         return cls(name=f"{agent_type}_p{player_id}", load_q_table_path=model_path)
-    if agent_type in ("l1", "l2", "nn_mc", "l3") and model_path:
+    if agent_type in ("l1", "l2", "l3") and model_path:
         return cls(name=f"{agent_type}_p{player_id}", load_model_path=model_path)
     return cls(name=f"{agent_type}_p{player_id}")
 
@@ -100,7 +97,7 @@ def run_evaluation(agent0_type: str, agent1_type: str, num_hands: int,
     def _get_model_path(atype, sarsa_p, belief_p):
         if atype == "sarsa":
             return sarsa_p
-        if atype in ("l1", "l2", "nn_mc", "l3"):
+        if atype in ("l1", "l2", "l3"):
             return belief_p
         return None
 
@@ -109,14 +106,14 @@ def run_evaluation(agent0_type: str, agent1_type: str, num_hands: int,
     agent0 = create_agent(agent0_type, 0, model_path=model0)
     agent1 = create_agent(agent1_type, 1, model_path=model1)
 
-    if agent0_type in ("sarsa", "l1", "l2", "nn_mc", "l3"):
+    if agent0_type in ("sarsa", "l1", "l2", "l3"):
         agent0.epsilon = 0.0
-    if agent1_type in ("sarsa", "l1", "l2", "nn_mc", "l3"):
+    if agent1_type in ("sarsa", "l1", "l2", "l3"):
         agent1.epsilon = 0.0
 
-    if agent0_type in ("l1", "l2", "nn_mc") and hasattr(agent0, "_auto_record_self"):
+    if agent0_type in ("l1", "l2") and hasattr(agent0, "_auto_record_self"):
         agent0._auto_record_self = False
-    if agent1_type in ("l1", "l2", "nn_mc") and hasattr(agent1, "_auto_record_self"):
+    if agent1_type in ("l1", "l2") and hasattr(agent1, "_auto_record_self"):
         agent1._auto_record_self = False
 
     from game.match_eval import run_match

@@ -1,4 +1,4 @@
-# agents/expert_agent.py - Nash equilibrium expert strategy based on custom CFR (52-card)
+"""CFR-based expert (equilibrium) agent."""
 
 from __future__ import annotations
 import random
@@ -9,8 +9,6 @@ from game.engine import Observation
 from game.constants import FOLD, CALL, RAISE
 from game.cfr_solver import CFRSolver
 
-
-# Default policy file path
 _DEFAULT_POLICY_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "cfr_policy.pkl"
@@ -18,23 +16,7 @@ _DEFAULT_POLICY_PATH = os.path.join(
 
 
 class ExpertAgent(BaseAgent):
-    """
-    Nash equilibrium baseline Agent based on custom CFR (Counterfactual Regret Minimization).
-
-    Key implementation details:
-      - Uses External Sampling MCCFR to solve approximate Nash equilibrium
-        for standard 52-card heads-up Texas Hold'em
-      - Trained policy cached to file, loaded on subsequent runs
-      - Queries action probability distribution from strategy table based on current information set
-        (hole_bucket, community_bucket, round, bet_level, raises), then samples by probability
-
-    Usage:
-        # First use: train and save
-        agent = ExpertAgent(train_iterations=50000)
-
-        # Subsequent use: auto-load from file
-        agent = ExpertAgent()
-    """
+    """Nash equilibrium agent using external-sampling MCCFR."""
 
     def __init__(
         self,
@@ -42,18 +24,11 @@ class ExpertAgent(BaseAgent):
         policy_path: str | None = None,
         train_iterations: int = 0,
     ):
-        """
-        Args:
-            name: Agent name
-            policy_path: policy file path, None uses default path
-            train_iterations: if > 0 and policy file doesn't exist, train for specified iterations
-        """
         super().__init__(name=name)
         self.policy_path = policy_path or _DEFAULT_POLICY_PATH
         self.solver = CFRSolver()
         self._policy_loaded = False
 
-        # Try to load existing policy
         if os.path.exists(self.policy_path):
             self.solver.load_policy(self.policy_path)
             self._policy_loaded = True
@@ -65,12 +40,7 @@ class ExpertAgent(BaseAgent):
             self._policy_loaded = True
 
     def act(self, obs: Observation) -> int:
-        """
-        Select action based on CFR policy.
-
-        Samples by probability from the strategy table's probability distribution,
-        falls back to equity-based heuristic if info set was never seen.
-        """
+        """Sample action from CFR strategy table; fall back to equity heuristic."""
         legal_actions = obs.legal_actions
 
         if self._policy_loaded:
@@ -84,7 +54,6 @@ class ExpertAgent(BaseAgent):
                 legal_actions=legal_actions,
             )
 
-            # Sample by probability
             r = random.random()
             cum = 0.0
             for a in legal_actions:
@@ -93,14 +62,10 @@ class ExpertAgent(BaseAgent):
                     return a
             return legal_actions[-1]
 
-        # No policy: equity-based heuristic
         return self._heuristic_act(obs)
 
     def get_action_probs(self, obs: Observation) -> list[float]:
-        """
-        Return CFR mixed strategy probability distribution [P(FOLD), P(CALL), P(RAISE)]
-        for the given observation. Used for knowledge distillation.
-        """
+        """Return CFR mixed strategy [P(FOLD), P(CALL), P(RAISE)] for distillation."""
         if self._policy_loaded:
             return self.solver.get_action_prob(
                 player=obs.position,
@@ -111,11 +76,10 @@ class ExpertAgent(BaseAgent):
                 raises_this_round=obs.raises_this_round,
                 legal_actions=obs.legal_actions,
             )
-        # Fallback: heuristic mixed strategy
         return self._heuristic_probs(obs)
 
     def _heuristic_probs(self, obs: Observation) -> list[float]:
-        """Equity-based heuristic mixed strategy (fallback)."""
+        """Equity-based fallback mixed strategy."""
         legal = obs.legal_actions
         probs = [0.0, 0.0, 0.0]
         if obs.equity > 0.65:
@@ -135,7 +99,6 @@ class ExpertAgent(BaseAgent):
             probs[FOLD] = 0.75; probs[CALL] = 0.20; probs[RAISE] = 0.05 if RAISE in legal else 0.0
             if RAISE not in legal:
                 probs = [0.80, 0.20, 0.0]
-        # Normalize over legal actions
         total = sum(probs[a] for a in legal)
         if total > 0:
             for a in range(3):
@@ -146,34 +109,23 @@ class ExpertAgent(BaseAgent):
         return probs
 
     def _heuristic_act(self, obs: Observation) -> int:
-        """Equity-based heuristic strategy (fallback when no CFR policy)"""
+        """Equity-based fallback action."""
         legal = obs.legal_actions
 
         if obs.equity > 0.65:
-            # Strong hand: prefer raise
             if RAISE in legal:
                 return RAISE
             return CALL
         elif obs.equity > 0.4:
-            # Medium hand: mostly call
             return CALL
         elif obs.equity > 0.25:
-            # Weak hand: depends on situation
             if obs.current_bet <= 10:
                 return CALL
             return FOLD
         else:
-            # Very weak: fold
             return FOLD
 
     def train(self, iterations: int = 50000, save: bool = True) -> None:
-        """
-        Manually trigger CFR training.
-
-        Args:
-            iterations: number of training iterations
-            save: whether to save policy after training
-        """
         self.solver.train(iterations=iterations)
         self._policy_loaded = True
         if save:

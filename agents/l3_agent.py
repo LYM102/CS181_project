@@ -1,4 +1,4 @@
-# agents/l3_agent.py — L3: CFR-distilled neural policy + belief + gate
+"""L3 agent: CFR-distilled neural policy with BNN belief and residual gate."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from agents.belief_gating import (
     opp_aggression_score,
     line_inconsistency_score,
 )
-from game.engine import Observation, GameEngine
+from game.evaluator import compute_hand_strength, HAND_STRENGTH_SAMPLES
 
 class ResidualBlock(nn.Module):
 
@@ -309,10 +309,12 @@ class L3Agent(BaseAgent):
         self.dagger_optimizer = torch.optim.AdamW(
             self.policy_net.parameters(), lr=lr, weight_decay=1e-4)
 
+    def add_dagger_sample(self, features: np.ndarray, sarsa_action: int) -> None:
         self.dagger_buffer.append((features.copy(), sarsa_action))
         if len(self.dagger_buffer) > self.dagger_capacity:
             self.dagger_buffer.pop(0)
 
+    def reset_dagger(self) -> None:
         self.dagger_buffer = []
 
     def train_dagger(self, epochs: int = 10, batch_size: int = 128,
@@ -403,19 +405,6 @@ class L3Agent(BaseAgent):
                 ewc_loss += (fisher * (param - frozen) ** 2).sum()
         return ewc_loss
 
-        self.rl_optimizer = torch.optim.AdamW(
-            self.policy_net.parameters(), lr=lr, weight_decay=1e-5)
-        self.rl_trajectory: list[dict] = []
-        self.rl_baseline = 0.0
-        self.rl_baseline_alpha = 0.05
-
-        self.rl_trajectory.append({
-            "features": features.copy(),
-            "action": action,
-            "log_prob": log_prob,
-            "reward": reward,
-        })
-
     def train_rl_step(self, ewc_lambda: float = 0.0):
         if len(self.rl_trajectory) == 0:
             return 0.0, 0
@@ -452,37 +441,6 @@ class L3Agent(BaseAgent):
         self.rl_trajectory = []
         avg_loss = total_loss / n_steps
         return avg_loss, n_steps
-
-        cc_count = len(obs.community_cards)
-        if cc_count < self._prev_community_count:
-            self.reset()
-        self._prev_community_count = cc_count
-
-        features, belief_probs, uncertainty = self._build_policy_features(obs)
-        x = torch.tensor(features, dtype=torch.float32).unsqueeze(0).to(self.device)
-
-        self.policy_net.eval()
-        with torch.no_grad():
-            logits = self.policy_net(x).squeeze(0).cpu().numpy()
-
-        legal = obs.legal_actions
-        if random.random() < self.epsilon:
-            action = random.choice(legal)
-            log_prob = np.log(1.0 / len(legal))
-        else:
-            probs = self._apply_belief_gating(
-                logits, belief_probs, uncertainty, legal, obs)
-            masked_probs = np.array([probs[a] if a in legal else 0.0 for a in range(3)])
-            total = masked_probs.sum()
-            if total > 1e-12:
-                masked_probs = masked_probs / total
-            else:
-                masked_probs = np.array(
-                    [1.0 / len(legal) if a in legal else 0.0 for a in range(3)])
-            action = int(np.random.choice(3, p=masked_probs))
-            log_prob = np.log(max(masked_probs[action], 1e-8))
-
-        return action, log_prob
 
     def save_model(self, filepath: str) -> None:
         import os
@@ -560,6 +518,8 @@ class L3Agent(BaseAgent):
             "belief_trained": self.belief_trained,
         }, filepath)
         print(f"[L3Agent] Belief net saved to {filepath}")
+
+
 def collect_expert_policy_data(expert_agent, num_hands: int = 30000,
                                 mask_prob: float = 0.5,
                                 verbose: bool = True) -> tuple:
@@ -600,8 +560,8 @@ def collect_expert_policy_data(expert_agent, num_hands: int = 30000,
                     opp_ranks = [Card.get_rank_int(c) for c in opp_hole]
                     opp_rank_avg = sum(opp_ranks) / (len(opp_ranks) * 12.0)
                     opp_suited = 1.0 if Card.get_suit_int(opp_hole[0]) == Card.get_suit_int(opp_hole[1]) else 0.0
-                    opp_strength = _opponent_strength_from_env(
-                        opp_hole, obs.community_cards)
+                    opp_strength = compute_hand_strength(
+                        opp_hole, obs.community_cards, num_samples=HAND_STRENGTH_SAMPLES)
                     feat = dummy._encode_bnn_features(
                         obs, opp_equity=opp_strength, opp_rank_avg=opp_rank_avg,
                         opp_suited=opp_suited)
@@ -736,9 +696,3 @@ def train_bnn_policy_kl(model: BNN_PolicyNet, X: np.ndarray,
         print(f"  DistillKL Final ValAcc: {val_acc:.3f}  Best: {best_val_acc:.3f}")
 
     return model
-
-
-#  SARSA Behavioral Cloning — Data Collection
-
-
-BNN_PolicyAgent = L3Agent

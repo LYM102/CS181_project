@@ -1,4 +1,4 @@
-# agents/l2_agent.py
+"""L2 agent: belief-augmented SARSA with residual action gating."""
 
 from agents.belief_sarsa_agent import BeliefSarsaAgent
 

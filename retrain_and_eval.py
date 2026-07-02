@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Retrain CFR/SARSA and optional belief/L3/gate/L1 pipeline."""
 
 import argparse
@@ -229,7 +228,7 @@ def main():
             raise SystemExit("Need belief_net_v4.pt for L1")
         print(f"\n[8] Train L1 Belief-Augmented SARSA ({args.l1_hands} hands)")
         from train.train_nn_mc_l1 import train_l1
-        train_l1(args.l1_hands, str(BELIEF_PATH), str(L1_PATH))
+        train_l1(args.l1_hands, belief_path=str(BELIEF_PATH), save_path=str(L1_PATH))
 
     print("\n" + "=" * 70)
     print("  DONE")

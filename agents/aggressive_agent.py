@@ -1,14 +1,4 @@
-# agents/aggressive_agent.py - Exploitative bluff/trap opponent for BNN + gating eval
-"""
-AggressiveAgent wraps ExpertAgent (CFR) with deliberate deviations:
-
-  - Weak hand (φ < HAND_STRENGTH_WEAK): bluff-raise with elevated probability
-  - Strong hand (φ > HAND_STRENGTH_STRONG): value-raise or slow-play (trap call)
-  - Medium: CFR base policy
-
-Thresholds align with treys hand-strength labels (evaluator.HAND_STRENGTH_*).
-See paper Appendix (app:aggressive) for full protocol.
-"""
+"""Exploitative opponent with deliberate bluff/trap deviations from CFR."""
 
 from __future__ import annotations
 import random
@@ -36,7 +26,7 @@ class AggressiveAgent(BaseAgent):
 
     def act(self, obs: Observation) -> int:
         legal_actions = obs.legal_actions
-        strength = obs.equity  # treys hand strength in [0, 1]
+        strength = obs.equity
 
         if strength < HAND_STRENGTH_WEAK:
             if RAISE in legal_actions and random.random() < self.bluff_raise_prob:
@@ -51,30 +41,6 @@ class AggressiveAgent(BaseAgent):
             return CALL if CALL in legal_actions else self._expert.act(obs)
 
         return self._expert.act(obs)
-
-    def update(self, obs, action, reward, next_obs, done):
-        pass
-
-
-class TightPassiveAgent(BaseAgent):
-    """Tight-passive contrast opponent (BNN training diversity)."""
-
-    def __init__(self, name: str = "TightPassiveAgent"):
-        super().__init__(name=name)
-
-    def act(self, obs: Observation) -> int:
-        legal_actions = obs.legal_actions
-        strength = obs.equity
-
-        if strength > HAND_STRENGTH_STRONG + 0.08:
-            return RAISE if RAISE in legal_actions else CALL
-        if strength > HAND_STRENGTH_WEAK:
-            return CALL if CALL in legal_actions else FOLD
-        if strength > HAND_STRENGTH_WEAK - 0.12:
-            if obs.current_bet <= 10:
-                return CALL if CALL in legal_actions else FOLD
-            return FOLD if FOLD in legal_actions else CALL
-        return FOLD if FOLD in legal_actions else CALL
 
     def update(self, obs, action, reward, next_obs, done):
         pass

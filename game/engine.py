@@ -1,4 +1,4 @@
-# game/engine.py - Game engine: dealing, betting rounds, showdown full flow
+"""Game engine: dealing, betting rounds, showdown."""
 
 from __future__ import annotations
 from dataclasses import dataclass, field
