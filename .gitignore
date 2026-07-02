@@ -6,7 +6,11 @@ __pycache__/
 # Training data & results
 logs/
 train/results/
-train/*.pt
-train/*.pkl
+figures/
+*.pkl
+*.pt
+*.npz
+*.csv
+*.json
 venv/
 .qoder/

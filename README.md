@@ -1,38 +1,46 @@
-# Belief-Gated Hold'em Ladder (BGHL)
+# Belief-Gated Policies in Abstracted Texas Hold'em
 
-**Course repo folder:** `CS181_project` (keep this path for submission and checkpoints).
+A research codebase for *Belief-Gated Policies in Abstracted Texas Hold'em* — a four-stage agent ladder that progressively incorporates opponent modeling into decision-making: tabular SARSA → belief-augmented SARSA → residual belief-gated SARSA → neural policy transfer.
 
-A heads-up (2-player) simplified Limit Texas Hold'em research codebase built around a **four-stage agent ladder**: tabular SARSA → belief-augmented SARSA → belief-gated tabular SARSA → optional neural extension. The design matches our paper *From SARSA to Belief-Gated Tabular Agents for Abstracted Heads-Up Texas Hold'em*.
-
-We use a standard 52-card deck, treys-based hand strength, fixed betting levels, and per-hand stack reset for evaluation (AvgR as the primary metric).
+We use a standard 52-card deck, treys-based hand strength, fixed betting levels, and per-hand stack reset for evaluation.
 
 ---
 
-## 1. Agent ladder
+## Agent Ladder
 
-| Stage | Class | Policy | Opponent modeling |
+| Stage | Class | Policy | Opponent Modeling |
 |-------|--------|--------|-------------------|
 | **L0** | `SarsaAgent` | Tabular Q (SARSA) | None |
-| **L1** | `L1Agent` | Same Q-table | BNN belief → **state** gate (τ = 0.65) |
-| **L2** | `L2Agent` | Same Q-table as L1 | BNN + **learned action gate** (residual logits) |
-| **L3** | `L3Agent` | CFR-distilled neural policy | Same belief + gate on policy logits |
+| **L1** | `L1Agent` | Same Q-table | BNN belief → state augmentation (τ = 0.65) |
+| **L2** | `L2Agent` | Same Q-table as L1 | BNN + learned residual action gate |
+| **L3** | `L3Agent` | CFR-distilled neural policy | Same belief + gate transferred to neural logits |
 
-Benchmarks: `ExpertAgent` (tabular CFR), `AggressiveAgent` (exploitable bluff/trap patterns), `RandomAgent`.
+**Reference opponents:** `ExpertAgent` (tabular CFR), `AggressiveAgent` (exploitable bluff/trap patterns), `RandomAgent`.
 
-**Naming note:** `NN_MCAgent` and `BNN_PolicyAgent` remain as backward-compatible aliases (`L1Agent`, `L3Agent`) in `agents/nn_mc_agent.py`. Checkpoint filenames such as `nn_mc_l1.pt` are unchanged so frozen models keep loading.
+### Core Modules
+
+1. **SARSA Base Policy (L0)** — Tabular SARSA over a 5-tuple state abstraction `(hand_strength, community_cards, bet_level, pot_size, position)`. Trained against Random.
+
+2. **Belief Module (L1)** — A BNN (MLP + MC Dropout) predicts opponent hand-strength class (weak/mid/strong) from a 53-dim feature vector. Belief is injected into the state only when confidence ≥ 0.65.
+
+3. **Residual Gating Network (L2)** — A small MLP that adds a correction vector to the base action scores:
+   \[
+   \mathbf{z}' = \mathbf{z}_{\text{base}} + g_\theta(\mathbf{x})
+   \]
+   where \(\mathbf{x}\) includes base scores, belief probabilities, uncertainty, and betting-context features. Trained via supervised imitation of an exploit oracle.
+
+4. **Neural Policy Transfer (L3)** — The same belief + gate framework applied to a CFR-distilled residual MLP policy, demonstrating that the gating mechanism generalizes beyond tabular representations.
 
 ---
 
-## 2. Project structure
+## Project Structure
 
 ```
 CS181_project/
 ├── main.py                     # Interactive / evaluate / step modes
 ├── eval_progressive.py         # Main ladder eval (L0–L3 vs Random/Aggressive/CFR)
-├── retrain_and_eval.py         # Full retrain pipeline (CFR → SARSA → BNN → L3 → gate → L1)
+├── retrain_and_eval.py         # Full retrain pipeline
 ├── requirements.txt
-├── cfr_policy.pkl              # CFR strategy cache
-├── sarsa_qtable.pkl            # L0 Q-table
 │
 ├── game/
 │   ├── engine.py               # Game engine + Observation
@@ -41,51 +49,32 @@ CS181_project/
 │   └── cfr_solver.py           # External-sampling MCCFR
 │
 ├── agents/
-│   ├── sarsa_agent.py          # L0
-│   ├── l1_agent.py             # L1 (belief in state)
-│   ├── l2_agent.py             # L2 (+ action gate)
-│   ├── l3_agent.py             # L3 (neural policy + gate)
+│   ├── sarsa_agent.py          # L0: tabular SARSA
+│   ├── l1_agent.py             # L1: belief-augmented SARSA
+│   ├── l2_agent.py             # L2: + residual action gate
+│   ├── l3_agent.py             # L3: neural policy + gate
 │   ├── belief_features.py      # 53-dim feature encoder (shared)
 │   ├── belief_net.py           # MC-Dropout BNN + training helpers
 │   ├── belief_sarsa_agent.py   # Tabular Q + BNN base class
 │   ├── belief_gating.py        # Learnable residual gate g_θ
-│   ├── expert_agent.py         # CFR equilibrium
+│   ├── expert_agent.py         # CFR equilibrium opponent
 │   ├── aggressive_agent.py     # Exploitative eval opponent
-│   └── nn_mc_agent.py          # Re-exports (legacy import path)
+│   └── random_agent.py         # Random baseline
 │
 ├── train/
 │   ├── train_belief_net.py     # BNN opponent-strength classifier
-│   ├── train_expert_distill.py # L3 policy (CFR KL distillation)
+│   ├── train_expert_distill.py # L3 neural policy (CFR distillation)
 │   ├── train_gating_net.py     # Gate g_θ (L2 or L3 logits)
 │   └── train_nn_mc_l1.py       # L1 gated-state SARSA Q-table
 │
-├── scripts/
-│   ├── collect_viz_data.py     # Collect per-decision-point data for figures
-│   └── viz_experiments.py      # Generate all paper figures from viz_data/ CSVs
-│
-├── figures/                    # Paper figures (generated by viz_experiments.py)
-│   ├── confusion_matrix.png
-│   ├── belief_trajectory.png
-│   ├── calibration_curve.png
-│   └── gate_effect.png
-│
-└── logs/                       # Frozen evaluation artifacts
-    ├── RESULTS_FINAL.json      # Summary index
-    ├── progressive_ladder.json # L0–L2 (3×1000)
-    ├── progressive_l3.json     # L3 headline numbers
-    ├── strict_ablation.json    # L3 mechanism (deterministic belief)
-    └── viz_data/               # Raw per-decision-point CSVs for figures
-        ├── l0_vs_agg.csv
-        ├── l1_vs_agg.csv
-        ├── l2_vs_agg.csv
-        └── l3_vs_agg.csv
+└── scripts/
+    ├── collect_viz_data.py     # Collect per-decision-point data
+    └── viz_experiments.py      # Generate paper figures
 ```
-
-Paper: `../paper/main.tex`
 
 ---
 
-## 3. Game rules
+## Game Rules
 
 | Parameter | Value |
 |-----------|--------|
@@ -100,9 +89,7 @@ Actions: Fold (0) / Call (1) / Raise (2).
 
 ---
 
-## 4. Training & evaluation
-
-### Environment
+## Quick Start
 
 ```bash
 pip install -r requirements.txt
@@ -112,36 +99,34 @@ pip install -r requirements.txt
 ### Train (in order)
 
 ```bash
-# 1. CFR + L0 SARSA (or use retrain_and_eval.py --clean)
+# 1. CFR solver + L0 SARSA
 python retrain_and_eval.py --clean
 
 # 2. BNN belief model
 python -u train/train_belief_net.py
 
 # 3. L3 neural policy (CFR distillation)
-python -u train/train_expert_distill.py --phase1_only 30000 train/results/policy/expert_distill_v2.pt
+python -u train/train_expert_distill.py
 
-# 4. Gate (L3 logits; separate checkpoint for L2 tabular)
-python -u train/train_gating_net.py --hands 12000 --epochs 100 \
-  --save train/results/policy/belief_gating_l3.pt
+# 4. Residual gating network
+python -u train/train_gating_net.py
 
-# 5. L1 Q-table (mixed Random/Aggressive, L0 warm-start)
+# 5. L1 Q-table
 python -u train/train_nn_mc_l1.py
 ```
 
 Or one shot: `python retrain_and_eval.py --clean --train-belief --train-distill --train-gating --train-l1`
 
-### Evaluate ladder
+### Evaluate
 
 ```bash
 python eval_progressive.py --hands 1000 --seeds 42 43 44
 ```
 
-### Head-to-head via CLI
+### Head-to-head
 
 ```bash
-python main.py --mode evaluate --agent0 l1 --agent1 aggressive --num_hands 1000 \
-  --belief_model0 train/results/policy/nn_mc_l1.pt
+python main.py --mode evaluate --agent0 l1 --agent1 aggressive --num_hands 1000
 ```
 
 | CLI key | Agent |
@@ -152,60 +137,20 @@ python main.py --mode evaluate --agent0 l1 --agent1 aggressive --num_hands 1000 
 | `l1` | L1Agent |
 | `l2` | L2Agent |
 | `l3` | L3Agent |
-| `nn_mc` | alias for `l1` |
-
-`AggressiveAgent` is used inside `eval_progressive.py`; register it in custom scripts if needed.
 
 ---
 
-## 5. Results (frozen, 3×1000 hands)
+## Evaluation Metrics
 
-Primary metric: **AvgR** (chips/hand) vs **Aggressive**, per-hand stack reset.
+- **AvgR** (primary): mean per-hand chip delta. Negative AvgR = agent loses chips on average.
+- **WR** (secondary): fraction of hands won.
 
-| Agent | AvgR vs Aggressive | WR vs Aggressive |
-|-------|-------------------|------------------|
-| L0 SARSA | −29.2 | 41.1% |
-| L1 | −15.1 | 45.9% |
-| L2 + Gate | −5.9 | 45.9% |
-| L3 + Gate | **+1.0** | 49.7% |
-| L3 No Gate | −3.3 | 45.6% |
-
-Progressive gains vs Aggressive: L0→L1 **+14.1**, L1→L2 **+9.2**, L3 NoGate→L3+Gate **+4.3** chips/hand.
-
-Full tables: `logs/RESULTS_FINAL.json`, `logs/progressive_ladder.json`, `logs/progressive_l3.json`.
-
----
-
-## 6. Frozen checkpoints
-
-| File | Role |
-|------|------|
-| `sarsa_qtable.pkl` | L0 |
-| `train/results/policy/belief_net_v4.pt` | BNN belief (L1/L2/L3) |
-| `train/results/policy/nn_mc_l1.pt` | L1/L2 Q-table + BNN weights |
-| `train/results/policy/belief_gating_l2.pt` | L2 action gate |
-| `train/results/policy/expert_distill_v2.pt` | L3 policy |
-| `train/results/policy/belief_gating.pt` | L3 gate (default; L2 fallback) |
-
-L3 inference defaults: `gate_selective=True`, `gate_scale=0.5`, `deterministic_belief=True` for strict ablation only.
-
----
-
-## 7. Should we rename the project?
-
-| Name | Use |
-|------|-----|
-| **`CS181_project`** | Keep — course directory, git remote, hard-coded paths |
-| **Belief-Gated Hold'em Ladder (BGHL)** | Recommended **display name** (README, paper, slides) |
-| Paper title | Long-form academic title (already in `paper/main.tex`) |
-
-No need to rename the repository folder unless the course requires a specific submission name. If you publish outside the course, a git repo name like `belief-gated-holdem-ladder` would align with the code structure.
+All evaluations use per-hand stack reset. Results are averaged over 3 random seeds × 1000 hands.
 
 ---
 
 ## References
 
-- Zinkevich et al. (2008): CFR / regret minimization  
-- Gal & Ghahramani (2016): MC Dropout as approximate Bayesian inference  
-- Sutton & Barto: SARSA / TD learning  
-- Heinrich & Silver (2016): NFSP (not implemented in this repo)
+- Zinkevich et al. (2008): CFR / regret minimization
+- Gal & Ghahramani (2016): MC Dropout as approximate Bayesian inference
+- Sutton & Barto: SARSA / TD learning
