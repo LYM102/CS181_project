@@ -5,7 +5,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from game.card import Deck, cards_to_pretty, cards_to_strs
-from game.evaluator import evaluate_hand, compare_hands, compute_equity
+from game.evaluator import (
+    evaluate_hand, compare_hands, compute_hand_strength, HAND_STRENGTH_SAMPLES,
+)
 from game.constants import (
     STARTING_CHIPS, SMALL_BLIND, BIG_BLIND,
     BETTING_LEVELS, MAX_RAISES,
@@ -107,7 +109,6 @@ class GameEngine:
         self.current_player: int = 0
         self.hand_over: bool = False
 
-    # ==================== Core Game Flow ====================
 
     def reset_hand(self) -> Observation:
         """
@@ -130,6 +131,9 @@ class GameEngine:
         self.players = []
         for i in range(NUM_PLAYERS):
             self.players.append(PlayerState(chips=prev_chips[i]))
+
+        # Snapshot before blinds — used for zero-sum per-hand rewards
+        self.chips_at_hand_start = [p.chips for p in self.players]
 
         # Alternate dealer position
         self.dealer_pos = self.hand_count % NUM_PLAYERS
@@ -275,15 +279,29 @@ class GameEngine:
         Returns:
             HandResult: result of this hand
         """
+        # Reset agent per-hand state (action tracking, etc.)
+        for agent in self.agents:
+            if hasattr(agent, 'reset'):
+                agent.reset()
+
         obs = self.reset_hand()
         done = False
 
         while not done:
             player = self.current_player
             action = self.agents[player].act(obs)
+
+            # Record action for all agents that support it
+            round_num = obs.current_round
+            for i, agent in enumerate(self.agents):
+                if hasattr(agent, 'record_action'):
+                    agent.record_action(player, action, round_num)
+
             obs, reward, done, info = self.step(action)
 
-        return info.get("result", self._resolve_hand())
+        if "result" in info:
+            return info["result"]
+        return self._resolve_hand()
 
     def run(self, num_hands: int = 1000) -> list[HandResult]:
         """
@@ -305,7 +323,58 @@ class GameEngine:
                     self.players[i].chips = STARTING_CHIPS
         return results
 
-    # ==================== Internal Methods ====================
+    def run_chip_depletion_match(self, max_hands: int = 10000) -> dict:
+        """
+        Play a chip-depletion match: each player starts with STARTING_CHIPS,
+        play until one player goes bankrupt or max_hands is reached.
+
+        Returns:
+            dict with keys:
+                - winner: int (0 or 1) or None (draw/max_hands reached)
+                - hands_played: int
+                - final_chips: list[int]
+                - hand_results: list[HandResult]
+        """
+        # Reset both players to starting chips
+        for i in range(NUM_PLAYERS):
+            if self.players:
+                self.players[i].chips = STARTING_CHIPS
+            else:
+                self.players = [PlayerState(chips=STARTING_CHIPS) for _ in range(NUM_PLAYERS)]
+
+        hand_results = []
+        hands_played = 0
+
+        for _ in range(max_hands):
+            # Check if any player is bankrupt
+            if self.players[0].chips <= 0:
+                return {
+                    'winner': 1,
+                    'hands_played': hands_played,
+                    'final_chips': [self.players[0].chips, self.players[1].chips],
+                    'hand_results': hand_results
+                }
+            if self.players[1].chips <= 0:
+                return {
+                    'winner': 0,
+                    'hands_played': hands_played,
+                    'final_chips': [self.players[0].chips, self.players[1].chips],
+                    'hand_results': hand_results
+                }
+
+            # Play one hand (chips carry over)
+            result = self.run_hand()
+            hand_results.append(result)
+            hands_played += 1
+
+        # Max hands reached without bankruptcy
+        return {
+            'winner': None,
+            'hands_played': hands_played,
+            'final_chips': [self.players[0].chips, self.players[1].chips],
+            'hand_results': hand_results
+        }
+
 
     def _player_bet(self, player: int, amount: int) -> None:
         """Player places a bet (moves chips to pot)"""
@@ -398,21 +467,16 @@ class GameEngine:
         # Distribute pot
         if winner is not None:
             self.players[winner].chips += self.pot
-            for i in range(NUM_PLAYERS):
-                if i == winner:
-                    rewards[i] = self.pot
-                else:
-                    rewards[i] = -self.players[i].total_bet
         else:
-            # Tie: split pot
+            # Tie: split pot (odd pot may lose 1 chip to integer division)
             half = self.pot // 2
             for i in active:
                 self.players[i].chips += half
-            for i in range(NUM_PLAYERS):
-                if i in active:
-                    rewards[i] = half - self.players[i].total_bet
-                else:
-                    rewards[i] = -self.players[i].total_bet
+        self.pot = 0  # Reset pot after distribution
+
+        # Zero-sum net chip change since hand start (before blinds)
+        for i in range(NUM_PLAYERS):
+            rewards[i] = self.players[i].chips - self.chips_at_hand_start[i]
 
         return HandResult(
             winner=winner,
@@ -452,15 +516,17 @@ class GameEngine:
             raises_this_round=self.raises_this_round,
         )
 
-        # Compute equity on demand (when community cards are available)
-        if len(self.community_cards) >= 3:
-            try:
-                obs.equity = compute_equity(
-                    self.players[player].hole_cards,
-                    self.community_cards,
-                )
-            except Exception:
-                obs.equity = 0.0
+        # Compute hand strength via treys (random completion to 7 cards)
+        # This measures absolute hand strength, not win probability.
+        # Preflop: 2 known + 5 sampled, Flop: 5 known + 2 sampled, etc.
+        try:
+            obs.equity = compute_hand_strength(
+                self.players[player].hole_cards,
+                self.community_cards,
+                num_samples=HAND_STRENGTH_SAMPLES,
+            )
+        except Exception:
+            obs.equity = 0.0
 
         return obs
 
@@ -479,7 +545,6 @@ class GameEngine:
                     actions.append(RAISE)
         return actions
 
-    # ==================== Display & Debug ====================
 
     def display_state(self) -> str:
         """Return a human-readable string of the current game state"""

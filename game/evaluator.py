@@ -15,8 +15,6 @@ _evaluator = Evaluator()
 FULL_DECK = build_full_deck()
 
 
-# ==================== Basic Hand Evaluation ====================
-
 def evaluate_hand(hole_cards: list[int], community_cards: list[int]) -> tuple[int, str]:
     """
     Evaluate hand strength.
@@ -61,9 +59,7 @@ def compare_hands(hole1: list[int], hole2: list[int],
     return 0, cls1
 
 
-# ==================== Equity Computation ====================
-
-@lru_cache(maxsize=20000)
+@lru_cache(maxsize=200000)
 def _cached_equity(hole_tuple: tuple, comm_tuple: tuple, sim: int) -> float:
     """
     Cached equity computation with MC sampling.
@@ -144,21 +140,90 @@ def compute_equity(hole_cards: list[int], community_cards: list[int],
                           sim)
 
 
-# ==================== Discretization ====================
+@lru_cache(maxsize=200000)
+def _cached_hand_strength(hole_tuple: tuple, comm_tuple: tuple,
+                          num_samples: int) -> float:
+    """
+    Cached hand strength via treys evaluator with random board completion.
+
+    When fewer than 7 cards are known (2 hole + up to 5 community),
+    randomly sample the missing community cards from the remaining deck,
+    evaluate the best 5-card hand from the 7 total cards using treys,
+    and average over multiple trials.
+
+    Returns a score in [0, 1] where higher = stronger hand.
+    """
+    hole = list(hole_tuple)
+    community = list(comm_tuple)
+    known = hole + community
+    used = set(known)
+    remaining = [c for c in FULL_DECK if c not in used]
+
+    cards_needed = 7 - len(known)  # 2 hole + 5 community = 7 total
+
+    if cards_needed <= 0:
+        # River: all 7 cards known, evaluate directly
+        rank, _ = evaluate_hand(hole, community)
+        return 1.0 - rank / 7462.0
+
+    total_rank = 0
+    for _ in range(num_samples):
+        sampled = random.sample(remaining, cards_needed)
+        full_community = community + sampled
+        rank, _ = evaluate_hand(hole, full_community)
+        total_rank += rank
+
+    avg_rank = total_rank / num_samples
+    return 1.0 - avg_rank / 7462.0
+
+
+# Shared MC sample count for SARSA (GameEngine) and CFR hand-strength bucketing.
+HAND_STRENGTH_SAMPLES = 100
+
+
+def compute_hand_strength(hole_cards: list[int], community_cards: list[int],
+                          num_samples: int = HAND_STRENGTH_SAMPLES) -> float:
+    """
+    Compute hand strength by completing to 7 cards and evaluating with treys.
+
+    This is more principled than the old MC equity because:
+      - It measures absolute hand strength (treys rank of best 5-card hand)
+      - Random completion correctly handles unknown community cards
+      - The score [0,1] is a cleaner state representation
+
+    Examples:
+      - Preflop: 2 known, sample 5 random community cards
+      - Flop:    5 known, sample 2 random community cards
+      - Turn:    6 known, sample 1 random community card
+      - River:   7 known, no sampling needed
+
+    Args:
+        hole_cards: 2 hole card ints
+        community_cards: 0~5 community card ints
+        num_samples: MC samples for incomplete boards
+
+    Returns:
+        strength: float in [0, 1], higher = stronger hand
+    """
+    return _cached_hand_strength(tuple(sorted(hole_cards)),
+                                 tuple(sorted(community_cards)),
+                                 num_samples)
+
 
 def equity_to_bin(equity: float, bins: int = 20) -> int:
     """
     Discretize equity [0, 1] into bin index [0, bins-1].
 
-    Uses logarithmic spacing: more granular near extremes.
+    Uses uniform linear mapping so that all bins are utilised.
+    The previous logarithmic mapping compressed realistic preflop
+    equities (0.28-0.88) into only 8 of 20 bins, wasting 55% of the
+    state space and causing severe state aliasing for SARSA.
     """
     if equity <= 0.0:
         return 0
     if equity >= 1.0:
         return bins - 1
-    # Logarithmic mapping
-    import math
-    idx = int(round(math.log(equity / (1 - equity + 1e-10) + 1) / math.log(2) * 3))
+    idx = int(equity * bins)
     return max(0, min(bins - 1, idx))
 
 
@@ -173,3 +238,36 @@ def pot_to_bin(pot: int) -> int:
         if pot <= t:
             return i
     return len(thresholds)  # bin 6
+
+
+# Calibrated for compute_hand_strength(): preflop ~[0.41, 0.67], river up to ~1.0.
+HAND_STRENGTH_WEAK = 0.48
+HAND_STRENGTH_STRONG = 0.62
+
+
+def opponent_hand_strength(hole_cards: list[int], community_cards: list[int],
+                           num_samples: int = HAND_STRENGTH_SAMPLES) -> float:
+    """Opponent hand strength for BNN labels/features (same as own-hand scoring)."""
+    return compute_hand_strength(hole_cards, community_cards, num_samples)
+
+
+def hand_strength_to_label(strength: float) -> int:
+    """Map treys hand strength to 3-class label: 0=weak, 1=mid, 2=strong."""
+    if strength > HAND_STRENGTH_STRONG:
+        return 2
+    if strength > HAND_STRENGTH_WEAK:
+        return 1
+    return 0
+
+
+def hand_strength_to_label_5class(strength: float) -> int:
+    """Map treys hand strength to 5-class label."""
+    if strength > 0.72:
+        return 4   # very_strong
+    if strength > 0.62:
+        return 3   # strong
+    if strength > 0.52:
+        return 2   # mid
+    if strength > 0.44:
+        return 1   # weak
+    return 0       # very_weak

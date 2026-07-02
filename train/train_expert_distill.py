@@ -1,20 +1,5 @@
-# train/train_expert_distill.py — CFR Expert Knowledge Distillation Pipeline
-"""
-CFR Expert → BNN Policy knowledge distillation with enhanced 53-dim features.
-
-Pipeline:
-  Phase 1 — Expert KL Distillation BC:
-    Collect Expert decisions in Expert vs Random games.
-    Train with KL divergence on Expert's mixed strategy soft labels.
-
-  Phase 2 — DAgger with Expert oracle:
-    Policy plays against Expert, Expert provides labels as oracle.
-
-Usage:
-    python -u train/train_expert_distill.py --phase1_only 30000 output.pt
-    python -u train/train_expert_distill.py 50000 output.pt 30000
-    python -u train/train_expert_distill.py 50000 output.pt --pretrained pretrained.pt
-"""
+# train/train_expert_distill.py
+"""CFR Expert → L3 policy (KL distillation + optional DAgger)."""
 from __future__ import annotations
 
 import sys, os, time, random
@@ -26,8 +11,8 @@ import torch
 import torch.nn.functional as F
 
 from game.engine import GameEngine
-from agents.nn_mc_agent import (
-    BNN_PolicyNet, BNN_PolicyAgent,
+from agents.l3_agent import (
+    BNN_PolicyNet, L3Agent,
     collect_expert_policy_data, train_bnn_policy_kl,
 )
 from agents.expert_agent import ExpertAgent
@@ -35,33 +20,18 @@ from agents.random_agent import RandomAgent
 
 
 def evaluate_vs(agent, opponent_cls, opp_name, num_hands=2000, agent_id=0):
-    opp = opponent_cls(name=opp_name)
-    env = GameEngine(agent, opp) if agent_id == 0 else GameEngine(opp, agent)
-    wins = losses = ties = 0
-    total_reward = 0.0
-    for _ in range(num_hands):
-        obs = env.reset_hand()
-        agent.reset()
-        done = False
-        step = 0
-        while not done:
-            step += 1
-            if step > 50:
-                break
-            cp = env.current_player
-            action = env.agents[cp].act(obs)
-            obs, reward, done, info = env.step(action)
-        if info and "result" in info:
-            r = info["result"].rewards
-            total_reward += r[agent_id]
-            w = info["result"].winner
-            if w == agent_id: wins += 1
-            elif w == (1 - agent_id): losses += 1
-            else: ties += 1
-    wr = wins / num_hands if num_hands > 0 else 0
-    avg_r = total_reward / num_hands if num_hands > 0 else 0
-    print(f"  vs {opp_name:>8s}: WR={wr:.1%} ({wins}W/{losses}L/{ties}T) AvgR={avg_r:+.1f}")
-    return wr, avg_r
+    from game.match_eval import run_match
+    opp_factory = lambda: opponent_cls(name=opp_name)
+    if agent_id == 0:
+        stats = run_match(agent, opp_factory, num_hands=num_hands, report_agent_id=0)
+    else:
+        stats = run_match(opp_factory, agent, num_hands=num_hands, report_agent_id=1)
+    wr = stats.win_rate / 100.0
+    wins = stats.wins.get(agent_id, 0)
+    losses = stats.num_hands - wins - stats.ties
+    print(f"  vs {opp_name:>8s}: WR={wr:.1%} ({wins}W/{losses}L/{stats.ties}T) "
+          f"AvgR={stats.avg_reward:+.1f}")
+    return wr, stats.avg_reward
 
 
 def phase1_expert_distill(distill_hands=30000, pretrain_epochs=150,
@@ -138,7 +108,7 @@ def train_one_hand_expert_dagger(env, agent, expert_agent, agent_id=0, reward_fi
         if step_count > 50: break
         cp = env.current_player
         if cp == agent_id:
-            features = agent._feat_builder._encode_bnn_features(obs)
+            features = agent.encode_policy_features(obs)
             action = agent.act(obs)
             expert_probs = expert_agent.get_action_probs(obs)
             hand_samples.append((features, np.array(expert_probs, dtype=np.float32)))
@@ -177,13 +147,16 @@ def phase2_expert_dagger(pretrained_model, device, num_hands=50000,
     expert = ExpertAgent(name="Expert_Oracle")
     print(f"  CFR info sets: {len(expert.solver.strategy_table)}")
 
-    agent = BNN_PolicyAgent(
+    agent = L3Agent(
         name="BNN_Policy_ExpertDistill", epsilon=1.0, epsilon_decay=0.9995, epsilon_min=0.05,
         mc_samples=20, device=device,
         hidden_dims=hidden_dims, dropout_rate=dropout_rate,
         use_residual=use_residual, use_layernorm=use_layernorm,
     )
     agent.policy_net.load_state_dict(pretrained_model.state_dict())
+    belief_path = "train/results/policy/belief_net.pt"
+    if os.path.exists(belief_path):
+        agent.load_belief_model(belief_path)
     agent.init_dagger(lr=dagger_lr, capacity=dagger_capacity)
 
     opponent = ExpertAgent()
@@ -263,7 +236,7 @@ def main():
         print("\n" + "=" * 60)
         print("  PHASE 1 EVALUATION")
         print("=" * 60)
-        agent = BNN_PolicyAgent(
+        agent = L3Agent(
             name="BNN_Policy_Eval", epsilon=0.0, mc_samples=20, device=device,
             hidden_dims=(256,128,64), dropout_rate=0.2, use_residual=True, use_layernorm=True)
         agent.policy_net.load_state_dict(model.state_dict())

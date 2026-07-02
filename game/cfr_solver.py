@@ -14,14 +14,15 @@ from __future__ import annotations
 # Information set design:
 #   info_key = (player, hole_bucket, community_bucket,
 #               betting_round, betting_level, raises_this_round)
-#   - hole_bucket: preflop equity discretized into 10 buckets
+#   - hole_bucket: treys hand strength via random board completion to 7
+#     cards, discretized into 10 buckets. Uses compute_hand_strength()
+#     for ALL rounds (identical to SARSA's state encoding).
 #   - community_bucket: number of community cards (0/3/4/5)
 
 from __future__ import annotations
 import random
 from collections import defaultdict
-from itertools import combinations
-from treys import Card, Evaluator
+from treys import Evaluator
 
 from game.constants import (
     BETTING_LEVELS, MAX_RAISES,
@@ -29,63 +30,18 @@ from game.constants import (
     PREFLOP, FLOP, TURN, RIVER,
 )
 from game.card import build_full_deck
+from game.evaluator import compute_hand_strength, HAND_STRENGTH_SAMPLES
 
-# ==================== Global Utilities ====================
 _evaluator = Evaluator()
 FULL_DECK = build_full_deck()
 
 
-def _card_sort_key(card: int) -> int:
-    rank_int = Card.get_rank_int(card)
-    suit_int = Card.get_suit_int(card)
-    return rank_int * 10 + suit_int
-
-
-def _compute_preflop_equity(hole_cards: list[int], num_opponent_samples: int = 50,
-                            num_board_samples: int = 8) -> float:
-    """MC sampling to compute preflop equity (adapted for 52-card deck)"""
-    remaining = [c for c in FULL_DECK if c not in set(hole_cards)]
-    wins = 0
-    ties = 0
-    total = 0
-
-    # Sample opponents instead of full enumeration (C(50,2)=1225 is too many)
-    opponent_combos = list(combinations(remaining, 2))
-    if len(opponent_combos) > num_opponent_samples:
-        sampled_opponents = random.sample(opponent_combos, num_opponent_samples)
-    else:
-        sampled_opponents = opponent_combos
-
-    for opp in sampled_opponents:
-        opp_cards = list(opp)
-        rem_after = [c for c in remaining if c not in set(opp_cards)]
-        for _ in range(num_board_samples):
-            board = random.sample(rem_after, min(5, len(rem_after)))
-            rank_me = _evaluator.evaluate(board, hole_cards)
-            rank_opp = _evaluator.evaluate(board, opp_cards)
-            if rank_me < rank_opp:
-                wins += 1
-            elif rank_me == rank_opp:
-                ties += 1
-            total += 1
-
-    return (wins + ties * 0.5) / total if total > 0 else 0.5
-
-
-# ==================== Preflop Equity Cache ====================
-_PREFLOP_EQUITY_CACHE: dict[tuple, float] = {}
-
-
-def get_preflop_equity(hole_cards: list[int]) -> float:
-    """Get preflop equity for hole cards (with cache)"""
-    key = tuple(sorted(hole_cards, key=_card_sort_key))
-    if key not in _PREFLOP_EQUITY_CACHE:
-        _PREFLOP_EQUITY_CACHE[key] = _compute_preflop_equity(list(key))
-    return _PREFLOP_EQUITY_CACHE[key]
-
-
-def equity_to_bucket(equity: float, num_buckets: int = 10) -> int:
-    return min(int(equity * num_buckets), num_buckets - 1)
+def equity_to_bucket(score: float, num_buckets: int = 10) -> int:
+    """
+    Map a [0,1] hand strength score to a bucket index via uniform linear mapping.
+    Used for both SARSA's equity_to_bin and CFR's info set key.
+    """
+    return min(int(score * num_buckets), num_buckets - 1)
 
 
 class CFRSolver:
@@ -111,8 +67,12 @@ class CFRSolver:
         self, player: int, hole_cards: list[int], community_cards: list[int],
         betting_round: int, betting_level: int, raises_this_round: int,
     ) -> tuple:
-        hole_eq = get_preflop_equity(hole_cards)
-        hole_bucket = equity_to_bucket(hole_eq, self.NUM_HOLE_BUCKETS)
+        # Treys hand strength for ALL rounds (identical to SARSA's _encode_state).
+        # - Preflop: 2 known + random 5 community → treys evaluate
+        # - Postflop: known cards + random completion to 7 → treys evaluate
+        hole_strength = compute_hand_strength(
+            hole_cards, community_cards, num_samples=HAND_STRENGTH_SAMPLES)
+        hole_bucket = equity_to_bucket(hole_strength, self.NUM_HOLE_BUCKETS)
         community_bucket = len(community_cards)
         return (player, hole_bucket, community_bucket,
                 betting_round, betting_level, raises_this_round)
@@ -141,7 +101,6 @@ class CFRSolver:
                 actions.append(RAISE)
         return actions
 
-    # ==================== External Sampling MCCFR ====================
 
     def _cfr(
         self,
@@ -180,7 +139,6 @@ class CFRSolver:
         strategy = self._get_strategy(info_key, legal_actions)
 
         if current_player == traversing_player:
-            # === Current player: traverse all actions ===
             # Accumulate average strategy
             for a in legal_actions:
                 self.strategy_table[info_key][a] += reach_probs[current_player] * strategy[a]
@@ -209,7 +167,6 @@ class CFRSolver:
             return util
 
         else:
-            # === Opponent: sample one action ===
             # Sample according to strategy
             r = random.random()
             cum = 0.0
@@ -352,11 +309,9 @@ class CFRSolver:
             half = pot / 2.0
             return [half - p0_total_bet, half - p1_total_bet]
 
-    # ==================== Training Interface ====================
 
     def train(self, iterations: int = 50000, log_interval: int = 5000) -> dict:
         """Run CFR training (External Sampling MCCFR)"""
-        self._warmup_equity_cache()
         stats = {"iterations": 0, "info_sets": 0}
 
         for i in range(iterations):
@@ -401,18 +356,6 @@ class CFRSolver:
         stats["info_sets"] = len(self.regret_table)
         return stats
 
-    def _warmup_equity_cache(self) -> None:
-        """Precompute preflop equity for all C(52,2)=1326 hole card combos."""
-        if _PREFLOP_EQUITY_CACHE:
-            return
-        print("  Warming up preflop equity cache (52-card deck, sampling)...")
-        for combo in combinations(FULL_DECK, 2):
-            key = tuple(sorted(combo, key=_card_sort_key))
-            if key not in _PREFLOP_EQUITY_CACHE:
-                _PREFLOP_EQUITY_CACHE[key] = _compute_preflop_equity(list(key))
-        print(f"  Cached {len(_PREFLOP_EQUITY_CACHE)} preflop equities")
-
-    # ==================== Policy Output ====================
 
     def get_policy(self) -> dict[tuple, list[float]]:
         """Get the trained average strategy"""
@@ -454,14 +397,16 @@ class CFRSolver:
                     probs[a] = sums[a] / total
                 return probs
 
-        # Heuristic fallback
-        eq = get_preflop_equity(hole_cards)
+        # Heuristic fallback (uses treys hand strength, thresholds adjusted
+        # for treys scale where strong ~0.67, medium ~0.52, weak ~0.41)
+        hs = compute_hand_strength(
+            hole_cards, community_cards, num_samples=HAND_STRENGTH_SAMPLES)
         probs = [0.0, 0.0, 0.0]
-        if eq > 0.6 and RAISE in legal_actions:
+        if hs > 0.60 and RAISE in legal_actions:
             probs[RAISE] = 0.6
             probs[CALL] = 0.35
             probs[FOLD] = 0.05
-        elif eq > 0.35:
+        elif hs > 0.48:
             probs[CALL] = 0.7
             probs[FOLD] = 0.2
             probs[RAISE] = 0.1

@@ -33,8 +33,6 @@ class Deck:
         return f"Deck({len(self.cards)} cards remaining)"
 
 
-# ==================== Card Utility Functions ====================
-
 def card_to_str(card: int) -> str:
     """Convert a treys card integer to a readable string, e.g. '7s', 'Th', 'As'"""
     return Card.int_to_str(card)

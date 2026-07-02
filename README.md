@@ -1,184 +1,211 @@
-# Texas Hold'em AI — Multi-Agent Training & Evaluation Platform
+# Belief-Gated Hold'em Ladder (BGHL)
 
-A heads-up (2-player) Limit Texas Hold'em AI platform with multiple agent implementations.
-Standard 52-card deck, fixed betting levels.
+**Course repo folder:** `CS181_project` (keep this path for submission and checkpoints).
+
+A heads-up (2-player) simplified Limit Texas Hold'em research codebase built around a **four-stage agent ladder**: tabular SARSA → belief-augmented SARSA → belief-gated tabular SARSA → optional neural extension. The design matches our paper *From SARSA to Belief-Gated Tabular Agents for Abstracted Heads-Up Texas Hold'em*.
+
+We use a standard 52-card deck, treys-based hand strength, fixed betting levels, and per-hand stack reset for evaluation (AvgR as the primary metric).
 
 ---
 
-## 1 Project Structure
+## 1. Agent ladder
+
+| Stage | Class | Policy | Opponent modeling |
+|-------|--------|--------|-------------------|
+| **L0** | `SarsaAgent` | Tabular Q (SARSA) | None |
+| **L1** | `L1Agent` | Same Q-table | BNN belief → **state** gate (τ = 0.65) |
+| **L2** | `L2Agent` | Same Q-table as L1 | BNN + **learned action gate** (residual logits) |
+| **L3** | `L3Agent` | CFR-distilled neural policy | Same belief + gate on policy logits |
+
+Benchmarks: `ExpertAgent` (tabular CFR), `AggressiveAgent` (exploitable bluff/trap patterns), `RandomAgent`.
+
+**Naming note:** `NN_MCAgent` and `BNN_PolicyAgent` remain as backward-compatible aliases (`L1Agent`, `L3Agent`) in `agents/nn_mc_agent.py`. Checkpoint filenames such as `nn_mc_l1.pt` are unchanged so frozen models keep loading.
+
+---
+
+## 2. Project structure
 
 ```
 CS181_project/
-├── main.py                     # Entry point (interactive / evaluate / step modes)
-├── requirements.txt            # Python dependencies
-├── cfr_policy.pkl              # Pre-trained CFR strategy cache
+├── main.py                     # Interactive / evaluate / step modes
+├── eval_progressive.py         # Main ladder eval (L0–L3 vs Random/Aggressive/CFR)
+├── retrain_and_eval.py         # Full retrain pipeline (CFR → SARSA → BNN → L3 → gate → L1)
+├── requirements.txt
+├── cfr_policy.pkl              # CFR strategy cache
+├── sarsa_qtable.pkl            # L0 Q-table
 │
-├── game/                       # Core game module
-│   ├── constants.py            # Game constants (blinds, betting levels, actions)
-│   ├── card.py                 # 52-card deck + treys utilities
-│   ├── evaluator.py            # Hand evaluation, comparison, equity computation
-│   ├── engine.py               # Game engine: deal → betting rounds → showdown
-│   └── cfr_solver.py           # External Sampling MCCFR solver
+├── game/
+│   ├── engine.py               # Game engine + Observation
+│   ├── match_eval.py           # Per-hand stack reset, AvgR / win rate
+│   ├── evaluator.py            # treys hand strength φ, bins
+│   └── cfr_solver.py           # External-sampling MCCFR
 │
-├── agents/                     # Agent implementations
-│   ├── base_agent.py           # Abstract base class
-│   ├── random_agent.py         # Random baseline
-│   ├── expert_agent.py         # Expert (CFR Nash equilibrium)
-│   ├── sarsa_agent.py          # SARSA (on-policy TD learning)
-│   ├── nn_mc_agent.py          # BNN-Policy + NN_MC Agent
-│   ├── nfsp_agent.py           # NFSP (Neural Fictitious Self-Play)
-│   └── aggressive_agent.py     # Aggressive/Tight-Passive agents (training diversity)
+├── agents/
+│   ├── sarsa_agent.py          # L0
+│   ├── l1_agent.py             # L1 (belief in state)
+│   ├── l2_agent.py             # L2 (+ action gate)
+│   ├── l3_agent.py             # L3 (neural policy + gate)
+│   ├── belief_features.py      # 53-dim feature encoder (shared)
+│   ├── belief_net.py           # MC-Dropout BNN + training helpers
+│   ├── belief_sarsa_agent.py   # Tabular Q + BNN base class
+│   ├── belief_gating.py        # Learnable residual gate g_θ
+│   ├── expert_agent.py         # CFR equilibrium
+│   ├── aggressive_agent.py     # Exploitative eval opponent
+│   └── nn_mc_agent.py          # Re-exports (legacy import path)
 │
-├── train/                      # Training scripts
-│   ├── compare_all.py          # Three-way comparison
-│   ├── train_bnn_policy.py     # BNN-Policy training
-│   ├── train_expert_distill.py # Expert policy distillation
-│   └── run_phase3_phase4.py    # Online RL + Self-play
+├── train/
+│   ├── train_belief_net.py     # BNN opponent-strength classifier
+│   ├── train_expert_distill.py # L3 policy (CFR KL distillation)
+│   ├── train_gating_net.py     # Gate g_θ (L2 or L3 logits)
+│   └── train_nn_mc_l1.py       # L1 gated-state SARSA Q-table
 │
-└── logs/
-    └── compare_all.out         # Final comparison results
+├── scripts/
+│   ├── collect_viz_data.py     # Collect per-decision-point data for figures
+│   └── viz_experiments.py      # Generate all paper figures from viz_data/ CSVs
+│
+├── figures/                    # Paper figures (generated by viz_experiments.py)
+│   ├── confusion_matrix.png
+│   ├── belief_trajectory.png
+│   ├── calibration_curve.png
+│   └── gate_effect.png
+│
+└── logs/                       # Frozen evaluation artifacts
+    ├── RESULTS_FINAL.json      # Summary index
+    ├── progressive_ladder.json # L0–L2 (3×1000)
+    ├── progressive_l3.json     # L3 headline numbers
+    ├── strict_ablation.json    # L3 mechanism (deterministic belief)
+    └── viz_data/               # Raw per-decision-point CSVs for figures
+        ├── l0_vs_agg.csv
+        ├── l1_vs_agg.csv
+        ├── l2_vs_agg.csv
+        └── l3_vs_agg.csv
 ```
+
+Paper: `../paper/main.tex`
 
 ---
 
-## 2 Game Rules
+## 3. Game rules
 
-| Parameter      | Value                        |
-| -------------- | ---------------------------- |
-| Mode           | 2-player heads-up            |
-| Deck           | 52 cards (4 suits × 13 ranks) |
-| Starting chips | 1000 per player              |
-| Blinds         | SB=5, BB=10                  |
-| Betting levels | {10, 20, 40, 80, 160, 320}  |
-| Max raises     | 4 per round                  |
+| Parameter | Value |
+|-----------|--------|
+| Mode | 2-player heads-up |
+| Deck | 52 cards |
+| Starting stack | 1000 per hand (reset each hand in eval) |
+| Blinds | SB = 5, BB = 10 |
+| Betting levels | {10, 20, 40, 80, 160, 320} |
+| Max raises / round | 4 |
 
-Action space: Fold / Call / Raise.
-
----
-
-## 3 Agents
-
-### 3.1 RandomAgent
-
-Uniform random selection over legal actions. Serves as the baseline.
-
-### 3.2 ExpertAgent (CFR)
-
-Uses External Sampling MCCFR to approximate a Nash equilibrium strategy. The information set is encoded as `(player, hole_bucket, community_bucket, round, betting_level, raises)`. The CFR solver produces ~322 distinct information sets with a mixed strategy over {Fold, Call, Raise} for each.
-
-### 3.3 SarsaAgent
-
-On-policy TD learning with a Q-table. The state is a 5-tuple `(equity_bin, community_card_count, betting_level, pot_bin, position)` with a state space of 20 × 4 × 6 × 7 × 2 = 6720. Uses ε-greedy exploration with decay.
-
-### 3.4 NN_MCAgent
-
-A hybrid agent combining a BNN (Bayesian Neural Network via MC Dropout) with a Q-table. The BNN predicts opponent hand strength (weak/mid/strong) from board texture and action history. The opponent belief is included as a state component in the Q-table.
-
-### 3.5 NFSPAgent
-
-Neural Fictitious Self-Play with two DNNs: a DQN (best-response network) and an average-policy network. Trained via self-play with anticipatory dynamics (η = 0.1). Uses a 15-dimensional normalized feature vector.
-
-### 3.6 BNN-PolicyAgent ★
-
-An end-to-end neural policy network that maps 53-dimensional features directly to action logits {Fold, Call, Raise}.
-
-**Network Architecture:**
-
-```
-Input (53-dim features)
-    │
-    ├─ ResidualBlock(53 → 256)
-    │   ├─ Linear + LayerNorm + ReLU
-    │   ├─ Dropout(0.15)
-    │   ├─ Linear(256→256) + LayerNorm
-    │   └─ + Residual connection
-    │
-    ├─ ResidualBlock(256 → 128)
-    ├─ ResidualBlock(128 → 64)
-    │
-    └─ Linear(64 → 3) → action logits
-```
-
-**53-Dimensional Input Features:**
-
-| Index | Feature | Description |
-|-------|---------|-------------|
-| [0] | Own equity | [0,1] |
-| [1:5] | Board texture | Paired/flush-draw/straight-draw/connectivity (5 dims) |
-| [5:9] | Current round onehot | Preflop/Flop/Turn/River (4 dims) |
-| [9:25] | Opponent action history | 4 rounds × action frequencies (16 dims) |
-| [25:41] | Self action history | Same structure (16 dims) |
-| [41] | New community card flag | Binary |
-| [42] | Pot odds | [0,1] |
-| [43] | SPR (stack-to-pot ratio) | [0,1] |
-| [44:47] | Opponent hand strength | True value at training, 0.5 mask at inference (3 dims) |
-| [47:53] | Betting level / position / raises remaining / eff. stack / legal actions | 6 dims |
-
-**MC Dropout:** Dropout remains active during inference. 20 stochastic forward passes produce a mean action distribution and an uncertainty estimate (variance). High uncertainty leads to more conservative action selection.
-
-**Training Pipeline:**
-
-| Phase | Method | Purpose |
-|-------|--------|---------|
-| 1 | Behavior Cloning | Supervised pretraining on SARSA/Expert demonstrations |
-| 2 | DAgger | Online policy distillation with SARSA as oracle |
-| 3 | REINFORCE + EWC | Online RL with anti-forgetting regularization |
-| 4 | Self-play | Play against historical policy snapshots |
+Actions: Fold (0) / Call (1) / Raise (2).
 
 ---
 
-## 4 Results
+## 4. Training & evaluation
 
-### 4.1 Evaluation Metrics
-
-Each matchup runs 3000 hands. Two metrics are reported:
-
-- **Win Rate (WR)**: fraction of hands won.
-- **AvgR (Average Reward)**: `Δchips / num_hands`, where `Δchips = chips_after_hand − chips_before_hand`. `chips_before` is captured after blinds are posted, so the blind amount (SB+BB=15 chips) is already in the pot — hence **both agents' AvgR values are positive**. The **difference** between them measures the true skill gap.
-
-### 4.2 Three-Way Comparison
-
-| Matchup | Win Rate | AvgR Difference |
-|---------|----------|----------------|
-| BNN-SP2 vs Expert | 48.1% / 48.2% | BNN +1.25 chips/hand |
-| BNN-SP2 vs SARSA | 83.7% / 14.9% | BNN +5.04 chips/hand |
-| SARSA vs Expert | 48.5% / 47.6% | SARSA +2.94 chips/hand |
-
-### 4.3 Performance Ranking
-
-```
-BNN-SP2  ⪆  SARSA  ⪆  Expert  >>>>  Random
-```
-
----
-
-## 5 Quick Start
+### Environment
 
 ```bash
-pip install -r requirements.txt   # treys + torch + numpy
-
-# Three-way comparison
-python -u train/compare_all.py
-
-# Custom head-to-head
-python main.py --mode evaluate --agent0 expert --agent1 sarsa \
-    --sarsa_model0 train/results/policy/sarsa_trained.pkl --num_hands 3000
+pip install -r requirements.txt
+# Python 3.10+; PyTorch, numpy, treys
 ```
 
-| Agent Key | Implementation |
-|-----------|---------------|
+### Train (in order)
+
+```bash
+# 1. CFR + L0 SARSA (or use retrain_and_eval.py --clean)
+python retrain_and_eval.py --clean
+
+# 2. BNN belief model
+python -u train/train_belief_net.py
+
+# 3. L3 neural policy (CFR distillation)
+python -u train/train_expert_distill.py --phase1_only 30000 train/results/policy/expert_distill_v2.pt
+
+# 4. Gate (L3 logits; separate checkpoint for L2 tabular)
+python -u train/train_gating_net.py --hands 12000 --epochs 100 \
+  --save train/results/policy/belief_gating_l3.pt
+
+# 5. L1 Q-table (mixed Random/Aggressive, L0 warm-start)
+python -u train/train_nn_mc_l1.py
+```
+
+Or one shot: `python retrain_and_eval.py --clean --train-belief --train-distill --train-gating --train-l1`
+
+### Evaluate ladder
+
+```bash
+python eval_progressive.py --hands 1000 --seeds 42 43 44
+```
+
+### Head-to-head via CLI
+
+```bash
+python main.py --mode evaluate --agent0 l1 --agent1 aggressive --num_hands 1000 \
+  --belief_model0 train/results/policy/nn_mc_l1.pt
+```
+
+| CLI key | Agent |
+|---------|--------|
 | `random` | RandomAgent |
 | `expert` | ExpertAgent (CFR) |
-| `sarsa` | SarsaAgent |
-| `nn_mc` | NN_MCAgent |
-| `nfsp` | NFSPAgent |
+| `sarsa` | SarsaAgent (L0) |
+| `l1` | L1Agent |
+| `l2` | L2Agent |
+| `l3` | L3Agent |
+| `nn_mc` | alias for `l1` |
+
+`AggressiveAgent` is used inside `eval_progressive.py`; register it in custom scripts if needed.
+
+---
+
+## 5. Results (frozen, 3×1000 hands)
+
+Primary metric: **AvgR** (chips/hand) vs **Aggressive**, per-hand stack reset.
+
+| Agent | AvgR vs Aggressive | WR vs Aggressive |
+|-------|-------------------|------------------|
+| L0 SARSA | −29.2 | 41.1% |
+| L1 | −15.1 | 45.9% |
+| L2 + Gate | −5.9 | 45.9% |
+| L3 + Gate | **+1.0** | 49.7% |
+| L3 No Gate | −3.3 | 45.6% |
+
+Progressive gains vs Aggressive: L0→L1 **+14.1**, L1→L2 **+9.2**, L3 NoGate→L3+Gate **+4.3** chips/hand.
+
+Full tables: `logs/RESULTS_FINAL.json`, `logs/progressive_ladder.json`, `logs/progressive_l3.json`.
+
+---
+
+## 6. Frozen checkpoints
+
+| File | Role |
+|------|------|
+| `sarsa_qtable.pkl` | L0 |
+| `train/results/policy/belief_net_v4.pt` | BNN belief (L1/L2/L3) |
+| `train/results/policy/nn_mc_l1.pt` | L1/L2 Q-table + BNN weights |
+| `train/results/policy/belief_gating_l2.pt` | L2 action gate |
+| `train/results/policy/expert_distill_v2.pt` | L3 policy |
+| `train/results/policy/belief_gating.pt` | L3 gate (default; L2 fallback) |
+
+L3 inference defaults: `gate_selective=True`, `gate_scale=0.5`, `deterministic_belief=True` for strict ablation only.
+
+---
+
+## 7. Should we rename the project?
+
+| Name | Use |
+|------|-----|
+| **`CS181_project`** | Keep — course directory, git remote, hard-coded paths |
+| **Belief-Gated Hold'em Ladder (BGHL)** | Recommended **display name** (README, paper, slides) |
+| Paper title | Long-form academic title (already in `paper/main.tex`) |
+
+No need to rename the repository folder unless the course requires a specific submission name. If you publish outside the course, a git repo name like `belief-gated-holdem-ladder` would align with the code structure.
 
 ---
 
 ## References
 
-- Zinkevich et al. (2008): "Regret Minimization in Games with Incomplete Information"
-- Heinrich & Silver (2016): "Deep Reinforcement Learning from Self-Play in Imperfect-Information Games"
-- Gal & Ghahramani (2016): "Dropout as a Bayesian Approximation"
-- Ross et al. (2011): "A Reduction of Imitation Learning to No-Regret Online Learning" (DAgger)
-- Kirkpatrick et al. (2017): "Overcoming catastrophic forgetting in neural networks" (EWC)
+- Zinkevich et al. (2008): CFR / regret minimization  
+- Gal & Ghahramani (2016): MC Dropout as approximate Bayesian inference  
+- Sutton & Barto: SARSA / TD learning  
+- Heinrich & Silver (2016): NFSP (not implemented in this repo)

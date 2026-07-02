@@ -1,18 +1,13 @@
-# agents/aggressive_agent.py - Aggressive bluffing agent for BNN training diversity
+# agents/aggressive_agent.py - Exploitative bluff/trap opponent for BNN + gating eval
 """
-AggressiveAgent wraps ExpertAgent with increased bluffing behavior.
+AggressiveAgent wraps ExpertAgent (CFR) with deliberate deviations:
 
-Purpose:
-  - Provide bluff-rich training data for BNN opponent modeling.
-  - When the agent has a weak hand, it raises with elevated probability (bluff).
-  - When the agent has a strong hand, it also raises more (over-value-betting).
-  - This creates data where the BNN must distinguish bluffs from value bets
-    using behavioral patterns (action sequences, board texture, bet sizing).
+  - Weak hand (φ < HAND_STRENGTH_WEAK): bluff-raise with elevated probability
+  - Strong hand (φ > HAND_STRENGTH_STRONG): value-raise or slow-play (trap call)
+  - Medium: CFR base policy
 
-Key parameters:
-  - bluff_raise_prob: probability of raising with weak hand (equity < 0.3)
-  - value_raise_prob: probability of raising with strong hand (equity > 0.6)
-  - slowplay_prob: probability of just calling with strong hand (trap)
+Thresholds align with treys hand-strength labels (evaluator.HAND_STRENGTH_*).
+See paper Appendix (app:aggressive) for full protocol.
 """
 
 from __future__ import annotations
@@ -22,21 +17,11 @@ from agents.base_agent import BaseAgent
 from agents.expert_agent import ExpertAgent
 from game.engine import Observation
 from game.constants import FOLD, CALL, RAISE
+from game.evaluator import HAND_STRENGTH_WEAK, HAND_STRENGTH_STRONG
 
 
 class AggressiveAgent(BaseAgent):
-    """
-    Aggressive bluffing agent that over-raises relative to Nash equilibrium.
-
-    Combines ExpertAgent's CFR-based strategy with additional bluff/value
-    raise overrides based on hand equity thresholds.
-
-    Bluffing behavior:
-      - Weak hands (equity < 0.3): raises with bluff_raise_prob (default 0.45)
-      - Medium hands (0.3-0.6): plays ExpertAgent strategy
-      - Strong hands (equity > 0.6): raises with value_raise_prob (default 0.8)
-      - Occasionally slowplays strong hands (just calls) to mix strategy
-    """
+    """CFR-based agent with exploitable bluff and slow-play frequencies."""
 
     def __init__(self, name: str = "AggressiveAgent",
                  bluff_raise_prob: float = 0.45,
@@ -47,73 +32,49 @@ class AggressiveAgent(BaseAgent):
         self.bluff_raise_prob = bluff_raise_prob
         self.value_raise_prob = value_raise_prob
         self.slowplay_prob = slowplay_prob
-
-        # Use ExpertAgent's CFR policy as base
         self._expert = ExpertAgent(name=f"{name}_base", policy_path=policy_path)
 
     def act(self, obs: Observation) -> int:
-        """
-        Action selection with overridden bluffing/value-betting frequencies.
-        """
         legal_actions = obs.legal_actions
-        equity = obs.equity
+        strength = obs.equity  # treys hand strength in [0, 1]
 
-        # --- Weak hand: bluff with elevated probability ---
-        if equity < 0.3:
+        if strength < HAND_STRENGTH_WEAK:
             if RAISE in legal_actions and random.random() < self.bluff_raise_prob:
                 return RAISE
-            # If not bluffing, still use expert strategy (may fold or call)
             return self._expert.act(obs)
 
-        # --- Strong hand: over-value-bet or slowplay ---
-        elif equity > 0.6:
-            # Slowplay: just call with strong hand (trap)
+        if strength > HAND_STRENGTH_STRONG:
             if random.random() < self.slowplay_prob:
                 return CALL if CALL in legal_actions else RAISE
-            # Value raise
             if RAISE in legal_actions and random.random() < self.value_raise_prob:
                 return RAISE
             return CALL if CALL in legal_actions else self._expert.act(obs)
 
-        # --- Medium hand: defer to ExpertAgent (Nash equilibrium) ---
-        else:
-            return self._expert.act(obs)
+        return self._expert.act(obs)
 
     def update(self, obs, action, reward, next_obs, done):
         pass
 
 
 class TightPassiveAgent(BaseAgent):
-    """
-    Tight-passive agent (counter-style to aggressive).
-
-    Only raises with very strong hands, folds marginal situations.
-    Provides contrast data for BNN training.
-    """
+    """Tight-passive contrast opponent (BNN training diversity)."""
 
     def __init__(self, name: str = "TightPassiveAgent"):
         super().__init__(name=name)
 
     def act(self, obs: Observation) -> int:
         legal_actions = obs.legal_actions
-        equity = obs.equity
+        strength = obs.equity
 
-        if equity > 0.7:
-            # Very strong: raise
-            if RAISE in legal_actions:
-                return RAISE
-            return CALL
-        elif equity > 0.45:
-            # Decent hand: call
+        if strength > HAND_STRENGTH_STRONG + 0.08:
+            return RAISE if RAISE in legal_actions else CALL
+        if strength > HAND_STRENGTH_WEAK:
             return CALL if CALL in legal_actions else FOLD
-        elif equity > 0.3:
-            # Marginal: call only if cheap
+        if strength > HAND_STRENGTH_WEAK - 0.12:
             if obs.current_bet <= 10:
                 return CALL if CALL in legal_actions else FOLD
             return FOLD if FOLD in legal_actions else CALL
-        else:
-            # Weak: fold
-            return FOLD if FOLD in legal_actions else CALL
+        return FOLD if FOLD in legal_actions else CALL
 
     def update(self, obs, action, reward, next_obs, done):
         pass

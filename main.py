@@ -1,13 +1,6 @@
-# main.py - Standard Texas Hold'em AI Platform (52-card)
+# main.py
 
-"""
-Usage examples:
-    # Run random Agent match
-    python main.py --num_hands 100
 
-    # Specify different Agents for match
-    python main.py --agent0 random --agent1 random --num_hands 1000
-"""
 
 import argparse
 from collections import defaultdict
@@ -18,40 +11,37 @@ from game.card import cards_to_pretty
 from agents.random_agent import RandomAgent
 from agents.expert_agent import ExpertAgent
 from agents.sarsa_agent import SarsaAgent
-from agents.nn_mc_agent import NN_MCAgent
-from agents.nfsp_agent import NFSPAgent
+from agents.l1_agent import L1Agent
+from agents.l2_agent import L2Agent
+from agents.l3_agent import L3Agent
 
 
-# ==================== Agent Registry ====================
 AGENT_REGISTRY = {
     "random": RandomAgent,
     "expert": ExpertAgent,
     "sarsa": SarsaAgent,
-    "nn_mc": NN_MCAgent,
-    "nfsp": NFSPAgent,
+    "l1": L1Agent,
+    "l2": L2Agent,
+    "l3": L3Agent,
+    "nn_mc": L1Agent,
 }
 
 
-def create_agent(agent_type: str, player_id: int, model_path: str = None,
-                 nfsp_model_path: str = None):
-    """Create Agent instance from type string"""
+def create_agent(agent_type: str, player_id: int, model_path: str = None):
+
     if agent_type not in AGENT_REGISTRY:
         raise ValueError(
             f"Unknown agent type: {agent_type}. Available: {list(AGENT_REGISTRY.keys())}")
     cls = AGENT_REGISTRY[agent_type]
     if agent_type == "sarsa" and model_path:
         return cls(name=f"{agent_type}_p{player_id}", load_q_table_path=model_path)
-    if agent_type == "nn_mc" and model_path:
+    if agent_type in ("l1", "l2", "nn_mc", "l3") and model_path:
         return cls(name=f"{agent_type}_p{player_id}", load_model_path=model_path)
-    if agent_type == "nfsp":
-        load_path = nfsp_model_path or model_path
-        if load_path:
-            return cls(name=f"{agent_type}_p{player_id}", load_model_path=load_path)
     return cls(name=f"{agent_type}_p{player_id}")
 
 
 def run_interactive(num_hands: int = 1, verbose: bool = True):
-    """Interactive single-hand run (with verbose output)"""
+
     agent0 = RandomAgent(name="Random_P0")
     agent1 = RandomAgent(name="Random_P1")
     engine = GameEngine(agent0, agent1)
@@ -105,91 +95,51 @@ def run_interactive(num_hands: int = 1, verbose: bool = True):
 
 def run_evaluation(agent0_type: str, agent1_type: str, num_hands: int,
                    sarsa_model0: str = None, sarsa_model1: str = None,
-                   nn_mc_model0: str = None, nn_mc_model1: str = None,
-                   nfsp_model0: str = None, nfsp_model1: str = None):
-    """Batch evaluate match performance between two Agents"""
-    def _get_model_path(atype, sarsa_p, nn_mc_p, nfsp_p):
-        if atype == "sarsa": return sarsa_p
-        if atype == "nn_mc": return nn_mc_p
-        if atype == "nfsp": return nfsp_p
+                   belief_model0: str = None, belief_model1: str = None):
+
+    def _get_model_path(atype, sarsa_p, belief_p):
+        if atype == "sarsa":
+            return sarsa_p
+        if atype in ("l1", "l2", "nn_mc", "l3"):
+            return belief_p
         return None
 
-    model0 = _get_model_path(agent0_type, sarsa_model0, nn_mc_model0, nfsp_model0)
-    model1 = _get_model_path(agent1_type, sarsa_model1, nn_mc_model1, nfsp_model1)
-    agent0 = create_agent(agent0_type, 0, model_path=model0, nfsp_model_path=nfsp_model0)
-    agent1 = create_agent(agent1_type, 1, model_path=model1, nfsp_model_path=nfsp_model1)
+    model0 = _get_model_path(agent0_type, sarsa_model0, belief_model0)
+    model1 = _get_model_path(agent1_type, sarsa_model1, belief_model1)
+    agent0 = create_agent(agent0_type, 0, model_path=model0)
+    agent1 = create_agent(agent1_type, 1, model_path=model1)
 
-    if agent0_type in ("sarsa", "nn_mc"):
+    if agent0_type in ("sarsa", "l1", "l2", "nn_mc", "l3"):
         agent0.epsilon = 0.0
-    if agent1_type in ("sarsa", "nn_mc"):
+    if agent1_type in ("sarsa", "l1", "l2", "nn_mc", "l3"):
         agent1.epsilon = 0.0
 
-    engine = GameEngine(agent0, agent1)
+    if agent0_type in ("l1", "l2", "nn_mc") and hasattr(agent0, "_auto_record_self"):
+        agent0._auto_record_self = False
+    if agent1_type in ("l1", "l2", "nn_mc") and hasattr(agent1, "_auto_record_self"):
+        agent1._auto_record_self = False
 
-    # If any agent is nn_mc, use custom loop that records ALL actions
-    # (self + opponent) for BNN feature consistency with training.
-    has_nn_mc = agent0_type == "nn_mc" or agent1_type == "nn_mc"
-
-    wins = defaultdict(int)
-    ties = 0
-    total_reward = defaultdict(float)
-
-    if has_nn_mc:
-        # Disable auto-record in act() — eval loop handles ALL action tracking
-        for a in engine.agents:
-            if hasattr(a, '_auto_record_self'):
-                a._auto_record_self = False
-        for _ in range(num_hands):
-            for a in engine.agents:
-                if hasattr(a, 'reset'):
-                    a.reset()
-            obs = engine.reset_hand()
-            done = False
-            while not done:
-                cp = engine.current_player
-                action = engine.agents[cp].act(obs)
-                round_before = obs.current_round
-                obs, reward, done, info = engine.step(action)
-                # Record action for nn_mc agents (both self and opponent)
-                for pid in range(2):
-                    if hasattr(engine.agents[pid], 'record_action'):
-                        engine.agents[pid].record_action(
-                            cp, action, round_before)
-
-            result = info.get("result")
-            if result:
-                if result.winner is not None:
-                    wins[result.winner] += 1
-                else:
-                    ties += 1
-                for pid in range(2):
-                    total_reward[pid] += result.rewards[pid]
-    else:
-        results = engine.run(num_hands=num_hands)
-        for r in results:
-            if r.winner is not None:
-                wins[r.winner] += 1
-            else:
-                ties += 1
-            for pid in range(2):
-                total_reward[pid] += r.rewards[pid]
-
-    avg_r0 = total_reward[0] / num_hands
-    avg_r1 = total_reward[1] / num_hands
+    from game.match_eval import run_match
+    stats = run_match(agent0, agent1, num_hands=num_hands, report_agent_id=0)
+    wins = stats.wins
+    ties = stats.ties
+    avg_r0 = stats.avg_reward
+    avg_r1 = stats.total_reward[1] / num_hands
 
     print(f"\n{'='*60}")
     print(f"  Evaluation: {agent0.name} vs {agent1.name}")
     print(f"  Total hands: {num_hands}")
     print(f"{'='*60}")
     print(
-        f"  Player 0 ({agent0.name}) wins: {wins[0]} ({wins[0]/num_hands*100:.1f}%)")
+        f"  Player 0 ({agent0.name}) wins: {wins.get(0, 0)} ({wins.get(0, 0)/num_hands*100:.1f}%)")
     print(
-        f"  Player 1 ({agent1.name}) wins: {wins[1]} ({wins[1]/num_hands*100:.1f}%)")
+        f"  Player 1 ({agent1.name}) wins: {wins.get(1, 0)} ({wins.get(1, 0)/num_hands*100:.1f}%)")
     print(f"  Ties: {ties} ({ties/num_hands*100:.1f}%)")
     print(f"{'='*60}")
-    print(f"  --- Chip-Based Metrics ---")
-    print(f"  Total chips P0: {total_reward[0]:+.0f}  |  Avg chips/hand: {avg_r0:+.2f}")
-    print(f"  Total chips P1: {total_reward[1]:+.0f}  |  Avg chips/hand: {avg_r1:+.2f}")
+    print(f"  --- Chip-Based Metrics (zero-sum) ---")
+    print(f"  Total chips P0: {stats.total_reward[0]:+.0f}  |  Avg chips/hand: {avg_r0:+.2f}")
+    print(f"  Total chips P1: {stats.total_reward[1]:+.0f}  |  Avg chips/hand: {avg_r1:+.2f}")
+    print(f"  Zero-sum check: AvgR sum = {stats.zero_sum_residual:+.4f}")
     if avg_r0 > avg_r1:
         print(f"  → P0 dominates: +{avg_r0 - avg_r1:.2f} chips/hand advantage")
     elif avg_r1 > avg_r0:
@@ -197,7 +147,7 @@ def run_evaluation(agent0_type: str, agent1_type: str, num_hands: int,
 
 
 def run_step_by_step():
-    """Step-by-step execution mode (suitable for RL training debugging)"""
+
     agent0 = RandomAgent(name="Random_P0")
     agent1 = RandomAgent(name="Random_P1")
     engine = GameEngine(agent0, agent1)
@@ -248,14 +198,10 @@ if __name__ == "__main__":
                         help="Path to saved Q-table for SARSA agent 0")
     parser.add_argument("--sarsa_model1", type=str, default=None,
                         help="Path to saved Q-table for SARSA agent 1")
-    parser.add_argument("--nn_mc_model0", type=str, default=None,
-                        help="Path to saved model for NN_MC agent 0")
-    parser.add_argument("--nn_mc_model1", type=str, default=None,
-                        help="Path to saved model for NN_MC agent 1")
-    parser.add_argument("--nfsp_model0", type=str, default=None,
-                        help="Path to saved model for NFSP agent 0")
-    parser.add_argument("--nfsp_model1", type=str, default=None,
-                        help="Path to saved model for NFSP agent 1")
+    parser.add_argument("--belief_model0", type=str, default=None,
+                        help="Path to saved model for L1/L2/L3 agent 0")
+    parser.add_argument("--belief_model1", type=str, default=None,
+                        help="Path to saved model for L1/L2/L3 agent 1")
 
     args = parser.parse_args()
 
@@ -264,7 +210,6 @@ if __name__ == "__main__":
     elif args.mode == "evaluate":
         run_evaluation(args.agent0, args.agent1, args.num_hands,
                    args.sarsa_model0, args.sarsa_model1,
-                   args.nn_mc_model0, args.nn_mc_model1,
-                   args.nfsp_model0, args.nfsp_model1)
+                   args.belief_model0, args.belief_model1)
     elif args.mode == "step":
         run_step_by_step()

@@ -55,9 +55,7 @@ class SarsaAgent(BaseAgent):
             self.load_q_table(load_q_table_path)
 
 
-    # ------------------------------------------------------------------
     #  Public interface (required by BaseAgent)
-    # ------------------------------------------------------------------
 
     def act(self, obs: Observation) -> int:
         """
@@ -91,9 +89,7 @@ class SarsaAgent(BaseAgent):
         # No‑op: SARSA requires next_action, which is not available here.
         pass
 
-    # ------------------------------------------------------------------
     #  SARSA‑specific learning method (to be used in training loops)
-    # ------------------------------------------------------------------
 
     def learn(self, state: tuple, action: int, reward: float,
               next_state: tuple, next_action: int, done: bool) -> None:
@@ -121,9 +117,7 @@ class SarsaAgent(BaseAgent):
         td_error = td_target - q_current
         self.q_table[state][action] += self.alpha * td_error
 
-    # ------------------------------------------------------------------
     #  Helper methods
-    # ------------------------------------------------------------------
 
     def _encode_state(self, obs: Observation) -> tuple:
         """
@@ -169,9 +163,7 @@ class SarsaAgent(BaseAgent):
         print(f"Q-table loaded from {filepath} (size={len(self.q_table)})")
 
 
-# ----------------------------------------------------------------------
 #  How to use SarsaAgent in a training loop (example)
-# ----------------------------------------------------------------------
 #
 # from game.engine import GameEngine
 # from agents.sarsa_agent import SarsaAgent
